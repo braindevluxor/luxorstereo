@@ -1,0 +1,90 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+/* Fondo base con degradado sutil azul (estilo Spotify, tono azul en vez de verde) */
+body {
+  background-color: #0a0e17;
+  background-image:
+    radial-gradient(1200px 600px at 15% -10%, rgba(37, 99, 235, 0.28), transparent 60%),
+    radial-gradient(900px 500px at 100% 0%, rgba(56, 189, 248, 0.16), transparent 55%);
+  background-attachment: fixed;
+  color: #e9eef7;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Paleta corporativa */
+:root {
+  --lux-navy: #0a0e17;
+  --lux-accent: #2563eb;
+}
+
+/* ===== Tema oscuro: se redefinen los tokens de Tailwind =====
+   Neutros: la rampa "slate" se invierte para el modo oscuro
+   (50 = superficie elevada más clara, 900 = texto principal claro). */
+@theme {
+  --color-slate-50: #1c2536;
+  --color-slate-100: #141b28;
+  --color-slate-200: #26313f;
+  --color-slate-300: #33415a;
+  --color-slate-400: #7c8aa3;
+  --color-slate-500: #97a3ba;
+  --color-slate-600: #b3bfd3;
+  --color-slate-700: #ccd5e4;
+  --color-slate-800: #131b29;
+  --color-slate-900: #eaeff8;
+
+  /* Superficies */
+  --color-app: #0a0e17;
+  --color-surface: #131b29;
+
+  /* Acentos: fondos translúcidos para chips/badges y versiones legibles */
+  --color-blue-50: rgb(59 130 246 / 0.14);
+  --color-blue-100: rgb(59 130 246 / 0.22);
+  --color-blue-200: rgb(59 130 246 / 0.34);
+  --color-blue-400: #60a5fa;
+  --color-blue-500: #3b82f6;
+  --color-blue-600: #2563eb;
+  --color-blue-700: #9cc4ff;
+
+  --color-emerald-50: rgb(16 185 129 / 0.14);
+  --color-emerald-200: rgb(16 185 129 / 0.32);
+  --color-emerald-400: #34d399;
+  --color-emerald-500: #10b981;
+  --color-emerald-600: #22c55e;
+  --color-emerald-700: #6ee7b7;
+
+  --color-amber-50: rgb(245 158 11 / 0.14);
+  --color-amber-200: rgb(245 158 11 / 0.32);
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #f59e0b;
+  --color-amber-700: #fcd34d;
+
+  --color-rose-50: rgb(244 63 94 / 0.14);
+  --color-rose-200: rgb(244 63 94 / 0.32);
+  --color-rose-400: #fb7185;
+  --color-rose-500: #f43f5e;
+  --color-rose-600: #e11d48;
+  --color-rose-700: #fda4af;
+
+  --color-sky-400: #38bdf8;
+}
+
+/* Degradado de marca reutilizable (azul) */
+.brand-gradient {
+  background-image: linear-gradient(135deg, #2563eb 0%, #38bdf8 100%);
+}
+
+input[type="range"] {
+  accent-color: var(--lux-accent);
+}
