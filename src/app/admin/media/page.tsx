@@ -1,8 +1,22 @@
 "use client";
 
 // Librería de medios: subida a Supabase Storage y gestión de metadatos.
+// Vista con panel lateral de filtros (tipo de archivo + búsqueda) y lista
+// principal con cabecera tipo "biblioteca de música", inspirada en el panel
+// de referencia pero con la paleta clara del proyecto (slate / blue / navy).
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Disc3,
+  Library,
+  ListMusic,
+  Megaphone,
+  Music2,
+  Search,
+  Trash2,
+  Upload,
+  X,
+} from "lucide-react";
 import { getSupabase } from "@/lib/supabase/client";
 import { formatDuration } from "@/lib/schedule";
 import type { Track, TrackType } from "@/lib/types";
@@ -19,6 +33,8 @@ import {
 } from "@/components/ui";
 
 const BUCKET = "audio";
+
+type Filter = "all" | TrackType;
 
 /** Lee la duración real del archivo local antes de subirlo. */
 function readDuration(file: File): Promise<number> {
@@ -48,8 +64,10 @@ export default function MediaPage() {
   const [progress, setProgress] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
-  const [filterType, setFilterType] = useState<"all" | TrackType>("all");
+  const [filterType, setFilterType] = useState<Filter>("all");
+  const [showUpload, setShowUpload] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const searchRef = useRef<HTMLInputElement>(null);
 
   const load = useCallback(async () => {
     const { data, error: err } = await getSupabase()
@@ -144,7 +162,15 @@ export default function MediaPage() {
     await load();
   }
 
-  const visible = (tracks ?? []).filter((t) => {
+  const all = tracks ?? [];
+  const counts = {
+    all: all.length,
+    music: all.filter((t) => t.type === "music").length,
+    commercial: all.filter((t) => t.type === "commercial").length,
+  };
+  const totalSeconds = all.reduce((sum, t) => sum + (t.duration ?? 0), 0);
+
+  const visible = all.filter((t) => {
     const matchesType = filterType === "all" || t.type === filterType;
     const q = filter.trim().toLowerCase();
     const matchesQuery =
@@ -153,6 +179,15 @@ export default function MediaPage() {
       (t.artist ?? "").toLowerCase().includes(q);
     return matchesType && matchesQuery;
   });
+
+  const NAV: { key: Filter; label: string; count: number; icon: typeof Music2 }[] = [
+    { key: "all", label: "Toda la biblioteca", count: counts.all, icon: ListMusic },
+    { key: "music", label: "Música", count: counts.music, icon: Music2 },
+    { key: "commercial", label: "Spots", count: counts.commercial, icon: Megaphone },
+  ];
+
+  const sectionLabel =
+    filterType === "music" ? "Música" : filterType === "commercial" ? "Spots" : "Biblioteca";
 
   return (
     <div className="space-y-6">
@@ -165,129 +200,275 @@ export default function MediaPage() {
 
       <ErrorNote message={error} />
 
-      <Card title="Subir archivos" description="Puedes seleccionar varios a la vez.">
-        <form onSubmit={upload} className="grid gap-4 sm:grid-cols-4">
-          <Field label="Tipo de esta tanda">
-            <select
-              value={type}
-              onChange={(e) => setType(e.target.value as TrackType)}
-              className={inputClass}
-            >
-              <option value="music">Música (hilo musical)</option>
-              <option value="commercial">Spot / promoción</option>
-            </select>
-          </Field>
-
-          <Field label="Artista / nota (opcional)">
-            <Input
-              value={artist}
-              onChange={(e) => setArtist(e.target.value)}
-              placeholder="Biblioteca interna"
-            />
-          </Field>
-
-          <Field label="Archivos">
-            <input
-              ref={inputRef}
-              type="file"
-              accept="audio/*"
-              multiple
-              onChange={(e) => setFiles(e.target.files)}
-              className={`${inputClass} file:mr-3 file:rounded-lg file:border-0 file:bg-slate-700 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-blue-400`}
-            />
-          </Field>
-
-          <div className="flex items-end">
-            <Button type="submit" disabled={!files || files.length === 0} className="w-full">
-              {progress ? "Subiendo…" : "Subir"}
-            </Button>
-          </div>
-
-          {progress && (
-            <p className="text-xs font-semibold text-blue-600 sm:col-span-4">{progress}</p>
-          )}
-        </form>
-      </Card>
-
-      <Card
-        title={`Archivos (${visible.length})`}
-        action={
-          <div className="flex gap-2">
-            <Input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Buscar…"
-              className="!w-40"
-            />
-            <select
-              value={filterType}
-              onChange={(e) => setFilterType(e.target.value as "all" | TrackType)}
-              className={`${inputClass} !w-32`}
-            >
-              <option value="all">Todo</option>
-              <option value="music">Música</option>
-              <option value="commercial">Spots</option>
-            </select>
-          </div>
-        }
-      >
-        {tracks === null ? (
-          <Spinner />
-        ) : visible.length === 0 ? (
-          <EmptyState>No hay archivos que coincidan.</EmptyState>
-        ) : (
-          <ul className="divide-y divide-slate-100">
-            {visible.map((t) => (
-              <li key={t.id} className="grid gap-2 py-3 sm:grid-cols-[1.6fr_1fr_auto] sm:items-center">
-                <div className="min-w-0">
-                  <input
-                    defaultValue={t.title}
-                    onBlur={(e) =>
-                      e.target.value.trim() &&
-                      e.target.value !== t.title &&
-                      patchTrack(t.id, { title: e.target.value.trim() })
-                    }
-                    className="w-full rounded-lg bg-transparent px-1 py-0.5 text-sm font-semibold text-slate-900 outline-none hover:bg-slate-50 focus:bg-slate-800"
-                    aria-label="Título"
-                  />
-                  <input
-                    defaultValue={t.artist ?? ""}
-                    placeholder="Sin artista"
-                    onBlur={(e) =>
-                      e.target.value !== (t.artist ?? "") &&
-                      patchTrack(t.id, { artist: e.target.value.trim() || null })
-                    }
-                    className="w-full rounded-lg bg-transparent px-1 py-0.5 text-xs text-slate-500 outline-none hover:bg-slate-50 focus:bg-slate-800"
-                    aria-label="Artista"
-                  />
-                </div>
-
-                <div className="flex items-center gap-2 text-xs text-slate-500">
+      <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
+        {/* Panel lateral: filtros y búsqueda */}
+        <aside className="space-y-4">
+          <Card>
+            <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-slate-400">
+              <Library size={14} />
+              Biblioteca
+            </p>
+            <nav className="mt-3 space-y-1">
+              {NAV.map((item) => {
+                const active = filterType === item.key;
+                const Icon = item.icon;
+                return (
                   <button
-                    onClick={() =>
-                      patchTrack(t.id, {
-                        type: t.type === "music" ? "commercial" : "music",
-                      })
-                    }
-                    title="Cambiar tipo"
+                    key={item.key}
+                    onClick={() => setFilterType(item.key)}
+                    className={`flex w-full items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm font-semibold transition ${
+                      active
+                        ? "bg-blue-600 text-white shadow-sm"
+                        : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"
+                    }`}
                   >
-                    <Badge tone={t.type === "music" ? "blue" : "amber"}>
-                      {t.type === "music" ? "música" : "spot"}
-                    </Badge>
+                    <Icon size={16} className={active ? "text-white" : "text-slate-400"} />
+                    <span className="flex-1 text-left">{item.label}</span>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[11px] font-bold ${
+                        active ? "bg-white/20 text-white" : "bg-slate-100 text-slate-500"
+                      }`}
+                    >
+                      {item.count}
+                    </span>
                   </button>
-                  <span className="font-mono">{formatDuration(t.duration)}</span>
-                </div>
+                );
+              })}
+            </nav>
 
-                <div className="flex justify-end">
-                  <Button variant="danger" onClick={() => removeTrack(t)}>
-                    Eliminar
+            <div className="mt-4">
+              <Field label="Buscar">
+                <div className="relative">
+                  <Search
+                    size={15}
+                    className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+                  />
+                  <input
+                    ref={searchRef}
+                    value={filter}
+                    onChange={(e) => setFilter(e.target.value)}
+                    placeholder="Título o artista…"
+                    className={`${inputClass} pl-9`}
+                  />
+                </div>
+              </Field>
+            </div>
+
+            <Button
+              variant="primary"
+              className="mt-4 flex w-full items-center justify-center gap-2"
+              onClick={() => {
+                setShowUpload(true);
+                setTimeout(() => inputRef.current?.focus(), 0);
+              }}
+            >
+              <Upload size={16} />
+              Subir archivos
+            </Button>
+          </Card>
+        </aside>
+
+        {/* Contenido principal */}
+        <div className="space-y-4">
+          {/* Cabecera tipo biblioteca */}
+          <section className="flex flex-wrap items-center gap-5 rounded-2xl border border-slate-200 bg-gradient-to-r from-blue-50 via-white to-white p-5 shadow-sm sm:p-6">
+            <span className="flex h-20 w-20 shrink-0 items-center justify-center rounded-2xl bg-slate-900 text-white shadow-lg">
+              <Disc3 size={36} className="text-blue-400" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <h2 className="truncate text-2xl font-black text-slate-900 sm:text-3xl">
+                {sectionLabel}
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                {tracks === null
+                  ? "Cargando…"
+                  : `${counts.all} archivo${counts.all === 1 ? "" : "s"} · ${
+                      counts.music
+                    } de música · ${counts.commercial} spots · ${formatDuration(
+                      totalSeconds,
+                    )} en total`}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                variant="ghost"
+                className="flex items-center gap-2"
+                onClick={() => searchRef.current?.focus()}
+              >
+                <Search size={16} />
+                Buscar
+              </Button>
+              <Button
+                className="flex items-center gap-2"
+                onClick={() => setShowUpload((v) => !v)}
+              >
+                <Upload size={16} />
+                Subir
+              </Button>
+            </div>
+          </section>
+
+          {/* Formulario de subida (colapsable) */}
+          {showUpload && (
+            <Card
+              title="Subir archivos"
+              description="Puedes seleccionar varios a la vez."
+              action={
+                <button
+                  onClick={() => setShowUpload(false)}
+                  className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-700"
+                  aria-label="Cerrar"
+                >
+                  <X size={16} />
+                </button>
+              }
+            >
+              <form onSubmit={upload} className="grid gap-4 sm:grid-cols-4">
+                <Field label="Tipo de esta tanda">
+                  <select
+                    value={type}
+                    onChange={(e) => setType(e.target.value as TrackType)}
+                    className={inputClass}
+                  >
+                    <option value="music">Música (hilo musical)</option>
+                    <option value="commercial">Spot / promoción</option>
+                  </select>
+                </Field>
+
+                <Field label="Artista / nota (opcional)">
+                  <Input
+                    value={artist}
+                    onChange={(e) => setArtist(e.target.value)}
+                    placeholder="Biblioteca interna"
+                  />
+                </Field>
+
+                <Field label="Archivos">
+                  <input
+                    ref={inputRef}
+                    type="file"
+                    accept="audio/*"
+                    multiple
+                    onChange={(e) => setFiles(e.target.files)}
+                    className={`${inputClass} file:mr-3 file:rounded-lg file:border-0 file:bg-blue-50 file:px-3 file:py-1.5 file:text-xs file:font-bold file:text-blue-700`}
+                  />
+                </Field>
+
+                <div className="flex items-end">
+                  <Button
+                    type="submit"
+                    disabled={!files || files.length === 0}
+                    className="w-full"
+                  >
+                    {progress ? "Subiendo…" : "Subir"}
                   </Button>
                 </div>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
+
+                {progress && (
+                  <p className="text-xs font-semibold text-blue-600 sm:col-span-4">
+                    {progress}
+                  </p>
+                )}
+              </form>
+            </Card>
+          )}
+
+          {/* Lista de archivos */}
+          <Card
+            title={`Archivos (${visible.length})`}
+            description={
+              filter.trim() || filterType !== "all"
+                ? "Filtro activo: usa el panel lateral para ver todo."
+                : undefined
+            }
+          >
+            {tracks === null ? (
+              <Spinner />
+            ) : visible.length === 0 ? (
+              <EmptyState>
+                {filter.trim()
+                  ? "No hay archivos que coincidan con la búsqueda."
+                  : "Aún no hay archivos: pulsa «Subir archivos»."}
+              </EmptyState>
+            ) : (
+              <ul className="divide-y divide-slate-100">
+                {visible.map((t, index) => (
+                  <li
+                    key={t.id}
+                    className="grid gap-2 py-3 sm:grid-cols-[1fr_auto] sm:items-center"
+                  >
+                    <div className="flex min-w-0 items-center gap-3">
+                      <span className="hidden w-6 shrink-0 text-right font-mono text-xs text-slate-400 sm:block">
+                        {index + 1}
+                      </span>
+                      <span
+                        className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${
+                          t.type === "music"
+                            ? "bg-blue-50 text-blue-600"
+                            : "bg-amber-50 text-amber-600"
+                        }`}
+                      >
+                        {t.type === "music" ? (
+                          <Music2 size={18} />
+                        ) : (
+                          <Megaphone size={18} />
+                        )}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <input
+                          defaultValue={t.title}
+                          onBlur={(e) =>
+                            e.target.value.trim() &&
+                            e.target.value !== t.title &&
+                            patchTrack(t.id, { title: e.target.value.trim() })
+                          }
+                          className="w-full rounded-lg bg-transparent px-1 py-0.5 text-sm font-semibold text-slate-900 outline-none hover:bg-slate-100 focus:bg-white"
+                          aria-label="Título"
+                        />
+                        <input
+                          defaultValue={t.artist ?? ""}
+                          placeholder="Sin artista"
+                          onBlur={(e) =>
+                            e.target.value !== (t.artist ?? "") &&
+                            patchTrack(t.id, { artist: e.target.value.trim() || null })
+                          }
+                          className="w-full rounded-lg bg-transparent px-1 py-0.5 text-xs text-slate-500 outline-none hover:bg-slate-100 focus:bg-white"
+                          aria-label="Artista"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-end gap-3 pl-14 sm:pl-0">
+                      <span className="font-mono text-xs text-slate-500">
+                        {formatDuration(t.duration)}
+                      </span>
+                      <button
+                        onClick={() =>
+                          patchTrack(t.id, {
+                            type: t.type === "music" ? "commercial" : "music",
+                          })
+                        }
+                        title="Cambiar tipo"
+                      >
+                        <Badge tone={t.type === "music" ? "blue" : "amber"}>
+                          {t.type === "music" ? "música" : "spot"}
+                        </Badge>
+                      </button>
+                      <button
+                        onClick={() => removeTrack(t)}
+                        className="rounded-lg p-2 text-slate-400 transition hover:bg-rose-50 hover:text-rose-600"
+                        aria-label={`Eliminar ${t.title}`}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+        </div>
+      </div>
     </div>
   );
 }
