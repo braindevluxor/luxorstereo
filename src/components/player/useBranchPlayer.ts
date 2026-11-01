@@ -15,7 +15,12 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { RealtimeChannel } from "@supabase/supabase-js";
-import { getSupabase, supabaseEnvProblem } from "@/lib/supabase/client";
+import {
+  getSupabase,
+  ignoreNextSocketClose,
+  socketCloseInfo,
+  supabaseEnvProblem,
+} from "@/lib/supabase/client";
 import {
   branchLocalTime,
   buildQueue,
@@ -60,6 +65,18 @@ export interface PlayerState {
   muted: boolean;
   alert: AlertPayload | null;
   realtime: string | null;
+  /**
+   * Resultado de la prueba directa del websocket (null = sin probar / en
+   * vivo). Visible en la barra de estado para diagnosticar bloqueos de red
+   * sin necesidad de abrir las herramientas de desarrollador.
+   */
+  rtProbe: string | null;
+  /**
+   * Motivo real del fallo del enlace de la app (error del join, código y
+   * motivo del cierre del socket…). Visible en la barra de estado para
+   * diagnosticar sin herramientas de desarrollador.
+   */
+  rtDiag: string | null;
   /** Imagen de fondo elegida por el administrador (null = degradado por defecto). */
   backgroundUrl: string | null;
 }
@@ -81,6 +98,10 @@ export interface PlayerEngine {
 }
 
 const HEARTBEAT_MS = 15_000;
+/** Sondeo de alertas por REST cuando el websocket no está conectado. */
+const ALERT_POLL_MS = 3_000;
+/** Tras este tiempo sin websocket se prueba la conexión directa (diagnóstico). */
+const RT_PROBE_DELAY_MS = 8_000;
 const CACHE_LIMIT = 8;
 const MAX_BACKOFF_MS = 30_000;
 const VOLUME_KEY = "luxor.volume";
@@ -104,6 +125,8 @@ export function useBranchPlayer(branchKey: string) {
     muted: false,
     alert: null,
     realtime: null,
+    rtProbe: null,
+    rtDiag: null,
     backgroundUrl: null,
   }));
 
@@ -847,28 +870,192 @@ export function useBranchPlayer(branchKey: string) {
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
 
-    // ---------- realtime ----------
-    const channel = supabase.channel(`branch:${branchKey}`);
-    channelRef = channel;
-    channel.on("broadcast", { event: "alert" }, ({ payload }) => {
-      void showAlert(payload as unknown as AlertPayload);
-    });
-    channel.on("broadcast", { event: "reload" }, () => {
-      void reload();
-    });
-    channel.subscribe((s) => {
-      patch({ realtime: s });
-      if (s === "SUBSCRIBED") {
-        // El canal acaba de (re)conectar: republicar presencia y latido.
-        trackPresence();
-        void pingNow();
+    // ---------- alertas por REST (respaldo si el websocket no conecta) ----------
+    // Deduplicación compartida: una misma alerta puede llegar por websocket
+    // (instantáneo) y por sondeo REST (respaldo); se muestra una sola vez.
+    const seenAlerts = new Set<string>();
+    let alertBaselineDone = false;
+    let alertPoll: number | null = null;
+
+    async function pollAlerts() {
+      if (disposed) return;
+      const { data, error } = await supabase.rpc("get_branch_alerts", {
+        p_branch_key: branchKey,
+      });
+      if (disposed || error) return; // SQL aún no cargado u error puntual
+      const rows = (data ?? []) as Array<{ payload?: AlertPayload | null }>;
+      for (const row of rows) {
+        const alert = row.payload;
+        if (!alert?.id || seenAlerts.has(alert.id)) continue;
+        seenAlerts.add(alert.id);
+        // La primera lectura es la línea base: lo que ya existía al abrir la
+        // página no se muestra (evita reenviar alertas antiguas tras un F5).
+        if (alertBaselineDone) void showAlert(alert);
       }
-    });
+      alertBaselineDone = true;
+    }
+
+    function setAlertPolling(on: boolean) {
+      if (on && alertPoll === null) {
+        alertPoll = window.setInterval(() => void pollAlerts(), ALERT_POLL_MS);
+      } else if (!on && alertPoll !== null) {
+        clearInterval(alertPoll);
+        alertPoll = null;
+      }
+    }
+
+    // ---------- sonda directa de websocket (diagnóstico visible) ----------
+    let rtStatus: string | null = null;
+    let probeTimer: number | null = null;
+    let probed = false;
+
+    function probeSocket() {
+      if (disposed || probed) return;
+      probed = true;
+      const base = (process.env.NEXT_PUBLIC_SUPABASE_URL ?? "").replace(
+        /^http/,
+        "ws",
+      );
+      const anon = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+      if (!base || !anon) return;
+      // El cierre propio de la sonda no debe confundirse con el del socket
+      // de la app (client.ts registra el último corte de Supabase).
+      ignoreNextSocketClose();
+      let probe: WebSocket | null = null;
+      try {
+        probe = new WebSocket(
+          `${base}/realtime/v1/websocket?apikey=${encodeURIComponent(anon)}&vsn=1.0.0`,
+        );
+      } catch {
+        patch({ rtProbe: "no soportado por el navegador" });
+        return;
+      }
+      let done = false;
+      const finish = (text: string) => {
+        if (done || disposed) return;
+        done = true;
+        patch({ rtProbe: text });
+        try {
+          probe?.close();
+        } catch {
+          /* ya cerrado */
+        }
+      };
+      probe.onopen = () => finish("directo: conecta ✅");
+      probe.onerror = () => finish("directo: sin conexión ❌");
+      probe.onclose = (e) =>
+        finish(
+          e.code === 1000
+            ? "directo: conecta ✅"
+            : `directo: corte ❌ (código ${e.code})`,
+        );
+      window.setTimeout(() => finish("directo: sin respuesta ❌"), 6_000);
+    }
+
+    // ---------- realtime ----------
+    // El enlace puede morir de forma terminal: el servidor manda phx_close,
+    // el canal pasa a CLOSED y el SDK lo retira de su lista (ya no se
+    // recupera solo: sólo un F5 lo recreaba). attachRealtime() reutiliza la
+    // instancia viva o crea una nueva (con manejadores frescos) y vuelve a
+    // engancharse; la llaman el arranque y el latido (auto-sanación).
+    function attachRealtime() {
+      const ch = supabase.channel(`branch:${branchKey}`);
+      if (ch !== channelRef) {
+        // Instancia nueva: registrar manejadores y publicarla como activa
+        // (los de la vieja, si acaso, quedan huérfanos con ella).
+        ch.on("broadcast", { event: "alert" }, ({ payload }) => {
+          const alert = payload as AlertPayload;
+          if (alert?.id) {
+            if (seenAlerts.has(alert.id)) return; // ya mostrada por el sondeo
+            seenAlerts.add(alert.id);
+          }
+          void showAlert(alert);
+        });
+        ch.on("broadcast", { event: "reload" }, () => {
+          void reload();
+        });
+        channelRef = ch;
+      }
+      try {
+        ch.subscribe((s, err) => {
+          // Estado de una instancia que ya no es la activa: se ignora para que
+          // un cierre tardío de la vieja no pise el estado de la nueva.
+          if (disposed || ch !== channelRef) return;
+          rtStatus = s;
+          patch({ realtime: s });
+          if (s === "SUBSCRIBED") {
+            // En vivo: el sondeo REST deja de hacer falta; se re-arma la sonda
+            // por si más adelante el websocket vuelve a caer.
+            setAlertPolling(false);
+            if (probeTimer) {
+              clearTimeout(probeTimer);
+              probeTimer = null;
+            }
+            probed = false;
+            patch({ rtProbe: null, rtDiag: null });
+            // El canal acaba de (re)conectar: republicar presencia y latido.
+            trackPresence();
+            void pingNow();
+          } else {
+            // Motivo real del fallo para la barra de estado: el error del join
+            // (sólo llega en CHANNEL_ERROR) o el cierre del socket capturado
+            // por client.ts (código + reason; p. ej. 1000 "heartbeat timeout").
+            if (err) {
+              patch({ rtDiag: `error de enlace: ${err.message.slice(0, 70)}` });
+            } else if (s === "CLOSED") {
+              const closeInfo = socketCloseInfo();
+              patch({ rtDiag: closeInfo ? `app corte: ${closeInfo}` : "app cerró el canal" });
+            } else if (s === "TIMED_OUT") {
+              patch({ rtDiag: "app sin respuesta (timeout)" });
+            }
+            // Sin websocket: las alertas siguen llegando por REST.
+            setAlertPolling(true);
+            if (!probeTimer && !probed) {
+              probeTimer = window.setTimeout(() => {
+                probeTimer = null;
+                if (!disposed && rtStatus !== "SUBSCRIBED") probeSocket();
+              }, RT_PROBE_DELAY_MS);
+            }
+          }
+        });
+      } catch {
+        // Instancia en un estado raro: el próximo latido reintenta.
+        patch({ rtDiag: "no se pudo reenganchar el canal" });
+      }
+    }
+
+    attachRealtime();
+    // Desde el arranque hay cobertura mientras el websocket no confirma
+    // (en cuanto conecta, el callback anterior lo detiene).
+    setAlertPolling(true);
+    probeTimer = window.setTimeout(() => {
+      probeTimer = null;
+      if (!disposed && rtStatus !== "SUBSCRIBED") probeSocket();
+    }, RT_PROBE_DELAY_MS);
+
+    // Auto-sanación en el latido: un canal CLOSED no se recupera solo (quedó
+    // fuera de la lista del SDK), y con token caducado el join falla. Cada
+    // latido sin enlace vivo se refresca la autenticación y se vuelve a
+    // enganchar (instancia nueva si la vieja murió). Sin esto, la sucursal
+    // tendría que dar F5 para recibir la siguiente alerta.
+    const kickRealtime = () => {
+      if (disposed || rtStatus === "SUBSCRIBED") return;
+      void supabase.realtime
+        .setAuth()
+        .catch(() => undefined) // sin sesión o red caída: se reintenta
+        .then(() => {
+          if (disposed || rtStatus === "SUBSCRIBED") return;
+          attachRealtime();
+        });
+    };
 
     // ---------- latido + refresco periódico ----------
     heartbeat = setInterval(async () => {
       if (disposed) return;
       beats += 1;
+
+      // Sin enlace en vivo, reintentar el enganche (cada 15 s como máximo).
+      kickRealtime();
 
       const { error } = await supabase.rpc("branch_ping", {
         p_branch_key: branchKey,
@@ -943,7 +1130,10 @@ export function useBranchPlayer(branchKey: string) {
       if (retryTimer) clearTimeout(retryTimer);
       if (alertTimer) clearTimeout(alertTimer);
       if (heartbeat) clearInterval(heartbeat);
-      void channel.unsubscribe();
+      if (alertPoll) clearInterval(alertPoll);
+      if (probeTimer) clearTimeout(probeTimer);
+      // Cerrar el canal activo (puede haber sido reemplazado por el kick).
+      if (channelRef) void channelRef.unsubscribe();
       audio.pause();
       audio.removeAttribute("src");
       window.removeEventListener("online", onOnline);

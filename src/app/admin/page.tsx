@@ -55,17 +55,20 @@ function VinylDisc({
       style={{ width: size, height: size }}
       aria-hidden="true"
     >
-      {playing ? (
-        // Reproduciendo: GIF animado (gira).
+      {/* Disco fijo siempre debajo: respalda al GIF si éste no carga */}
+      <span className="absolute inset-0 rounded-full bg-slate-800 ring-1 ring-inset ring-slate-600/60" />
+      {playing && (
+        // Reproduciendo: GIF animado (gira) encima del disco fijo.
         <img
-          src="/disco rojo.gif"
+          src="/disco-rojo.gif"
           alt=""
           className="absolute left-1/2 top-1/2 h-[150%] w-[150%] max-w-none -translate-x-1/2 -translate-y-1/2 object-contain motion-reduce:hidden"
           draggable={false}
+          onError={(e) => {
+            // Sin GIF: queda el disco fijo (nunca un hueco ni icono roto).
+            e.currentTarget.style.display = "none";
+          }}
         />
-      ) : (
-        // En pausa / link cerrado: disco fijo (no gira).
-        <span className="absolute inset-0 rounded-full bg-slate-800 ring-1 ring-inset ring-slate-600/60" />
       )}
       {/* Centro: verde = en línea, rojo = desconectada */}
       <span

@@ -30,11 +30,34 @@ export async function broadcastToBranch(
     .some((c) => c.topic === `realtime:${topic}`);
   const channel = supabase.channel(topic);
 
+  // Las alertas, además del broadcast instantáneo, se guardan en BD: el
+  // reproductor las recoge por REST aunque su websocket esté caído (así la
+  // alerta siempre llega, con la latencia que sea). Los «reload» son sólo
+  // en vivo (la configuración también se refresca sola cada minuto).
+  const dbPromise =
+    event === "alert"
+      ? (async () => {
+          try {
+            const { error } = await supabase.rpc("push_branch_alert", {
+              p_branch_key: branchKey,
+              p_payload: payload,
+            });
+            return !error;
+          } catch {
+            return false;
+          }
+        })()
+      : Promise.resolve(false);
+
+  const wsPromise = channel
+    .httpSend(event, payload)
+    .then((res) => res.success)
+    .catch(() => false);
+
   try {
-    const res = await channel.httpSend(event, payload);
-    return res.success;
-  } catch {
-    return false;
+    const [dbOk, wsOk] = await Promise.all([dbPromise, wsPromise]);
+    // Confirmación si quedó registrada en BD o salió por broadcast.
+    return dbOk || wsOk;
   } finally {
     if (!preexisting) void supabase.removeChannel(channel);
   }

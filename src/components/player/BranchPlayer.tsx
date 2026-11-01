@@ -153,28 +153,6 @@ function SoundWave({
   );
 }
 
-// Ecualizador decorativo de la barra inferior (se anima al reproducir).
-function Equalizer({ active }: { active: boolean }) {
-  return (
-    <span className="flex h-9 items-end gap-[3px]" aria-hidden="true">
-      {Array.from({ length: 24 }, (_, i) => (
-        <span
-          key={i}
-          className={active ? "eq-bar" : ""}
-          style={{
-            width: 3,
-            height: `${25 + ((i * 37) % 75)}%`,
-            borderRadius: 2,
-            backgroundColor:
-              i % 3 === 0 ? "#38bdf8" : "rgba(255,255,255,0.45)",
-            animationDelay: `${(i % 7) * 0.13}s`,
-          }}
-        />
-      ))}
-    </span>
-  );
-}
-
 function useClock(timeZone: string | null): string {
   const [now, setNow] = useState(() => new Date());
   useEffect(() => {
@@ -318,49 +296,61 @@ export default function BranchPlayer({ branchKey }: { branchKey: string }) {
 
       {/* Barra inferior de control (estilo referencia) */}
       <div className="relative z-20 px-4 pb-5 sm:px-10 sm:pb-8">
-        <div className="mx-auto flex max-w-5xl items-center gap-3 rounded-2xl bg-black/60 p-3 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl sm:gap-4">
-          <img
-            src="/disco rojo.gif"
-            alt=""
-            className="h-14 w-14 shrink-0 rounded-xl object-cover"
-            draggable={false}
-          />
+        <div className="mx-auto flex max-w-5xl items-center gap-4 rounded-3xl bg-black/60 p-4 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl sm:gap-5 sm:p-5">
+          {/* Disco: GIF animado sobre un vinilo estático de respaldo. Si el
+              GIF tarda, no carga o el navegador lo bloquea, siempre se ve el
+              disco (el GIF se oculta con onError, sin icono roto). */}
+          <span
+            className="relative h-16 w-16 shrink-0 overflow-hidden rounded-2xl sm:h-20 sm:w-20"
+            aria-hidden="true"
+          >
+            <span className="absolute inset-0 rounded-2xl bg-slate-900 ring-1 ring-inset ring-slate-500/50" />
+            <img
+              src="/disco-rojo.gif"
+              alt=""
+              fetchPriority="high"
+              className="absolute inset-0 h-full w-full object-cover"
+              draggable={false}
+              onError={(e) => {
+                e.currentTarget.style.display = "none";
+              }}
+            />
+          </span>
 
           <div className="min-w-0">
-            <p className="text-[10px] font-black uppercase tracking-[0.25em] text-sky-400">
+            <p className="text-[11px] font-black uppercase tracking-[0.25em] text-sky-400">
               Sonando ahora
             </p>
-            <p className="truncate text-sm font-bold text-white">
+            <p className="truncate text-base font-bold text-white sm:text-lg">
               {now?.title ?? "En espera…"}
             </p>
-            <p className="truncate text-xs text-white/60">{now?.artist ?? "—"}</p>
+            <p className="truncate text-sm text-white/60">{now?.artist ?? "—"}</p>
           </div>
 
           {/* Progreso + ecualizador (pantallas medianas en adelante) */}
           <div className="hidden flex-1 items-center gap-4 md:flex">
-            <span className="font-mono text-[11px] text-white/60">
+            <span className="font-mono text-xs text-white/60">
               {formatDuration(state.progress)}
             </span>
-            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/15">
+            <div className="h-2.5 flex-1 overflow-hidden rounded-full bg-white/15">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-blue-500 to-sky-400 transition-[width] duration-300 ease-linear"
                 style={{ width: `${progress * 100}%` }}
               />
             </div>
-            <span className="font-mono text-[11px] text-white/60">
+            <span className="font-mono text-xs text-white/60">
               {formatDuration(now?.duration ?? 0)}
             </span>
-            <Equalizer active={playing} />
           </div>
 
           {/* Acciones */}
           <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-3">
             <button
               onClick={() => controls.current?.toggleMute()}
-              className="hidden rounded-xl p-2.5 text-white/80 transition hover:bg-white/10 hover:text-white sm:block"
+              className="hidden rounded-xl p-3 text-white/80 transition hover:bg-white/10 hover:text-white sm:block"
               aria-label={state.muted ? "Activar sonido" : "Silenciar"}
             >
-              {state.muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
+              {state.muted ? <VolumeX size={22} /> : <Volume2 size={22} />}
             </button>
             <input
               type="range"
@@ -369,26 +359,26 @@ export default function BranchPlayer({ branchKey }: { branchKey: string }) {
               step={0.01}
               value={state.muted ? 0 : state.volume}
               onChange={(e) => controls.current?.setVolume(Number(e.target.value))}
-              className="hidden w-24 sm:block"
+              className="volume-gradient hidden w-28 sm:block"
               aria-label="Volumen"
             />
             <button
               onClick={() => controls.current?.reload()}
-              className="hidden rounded-xl p-2.5 text-white/80 transition hover:bg-white/10 hover:text-white sm:block"
+              className="hidden rounded-xl p-3 text-white/80 transition hover:bg-white/10 hover:text-white sm:block"
               aria-label="Sincronizar"
               title="Sincronizar con el centro"
             >
-              <RefreshCw size={18} />
+              <RefreshCw size={20} />
             </button>
             <button
               onClick={() => controls.current?.toggle()}
-              className="flex h-14 w-14 items-center justify-center rounded-full bg-white text-black shadow-lg transition hover:scale-105 active:scale-95"
+              className="flex h-16 w-16 items-center justify-center rounded-full bg-white text-black shadow-lg transition hover:scale-105 active:scale-95"
               aria-label={playing ? "Pausar" : "Reproducir"}
             >
               {playing ? (
-                <Pause size={24} fill="currentColor" />
+                <Pause size={28} fill="currentColor" />
               ) : (
-                <Play size={24} fill="currentColor" className="ml-0.5" />
+                <Play size={28} fill="currentColor" className="ml-0.5" />
               )}
             </button>
           </div>
@@ -398,7 +388,13 @@ export default function BranchPlayer({ branchKey }: { branchKey: string }) {
           className="mt-2 text-center text-[11px] text-white/40"
           title={state.message}
         >
-          {state.message} · {state.realtime === "SUBSCRIBED" ? "en vivo" : `tiempo real: ${state.realtime ?? "…"}`} · latido 15 s
+          {state.message} ·{" "}
+          {state.realtime === "SUBSCRIBED"
+            ? "en vivo"
+            : `tiempo real: ${state.realtime ?? "…"}`}{" "}
+          · latido 15 s
+          {state.rtProbe ? ` · wss ${state.rtProbe}` : ""}
+          {state.rtDiag ? ` · ${state.rtDiag}` : ""}
         </p>
       </div>
 

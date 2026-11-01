@@ -85,22 +85,6 @@ body {
   background-image: linear-gradient(135deg, #2563eb 0%, #38bdf8 100%);
 }
 
-/* Ecualizador decorativo del reproductor de sucursal */
-@keyframes eq {
-  0%,
-  100% {
-    transform: scaleY(0.25);
-  }
-  50% {
-    transform: scaleY(1);
-  }
-}
-
-.eq-bar {
-  transform-origin: bottom;
-  animation: eq 0.9s ease-in-out infinite;
-}
-
 /* Anillo neón verde del disco de vinilo (sucursal en línea):
    brillo en el borde que parpadea lentamente. */
 @keyframes neon-ring {
@@ -122,13 +106,61 @@ body {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .eq-bar {
-    animation: none;
-    transform: scaleY(0.7);
-  }
   .neon-disc {
     animation: none;
   }
+}
+
+/* Volumen del reproductor de sucursal: medidor de nivel en degradado
+   verde (bajo) → rojo (alto) y pulgar con degradado radial verde (centro)
+   → rojo (borde). Sólo lo usa la barra del reproductor (los range del
+   panel mantienen el accent-color de abajo). */
+.volume-gradient {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 8px;
+  background: transparent;
+  outline: none;
+  cursor: pointer;
+}
+
+.volume-gradient::-webkit-slider-runnable-track {
+  height: 8px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, #22c55e 0%, #eab308 55%, #ef4444 100%);
+}
+
+.volume-gradient::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 18px;
+  height: 18px;
+  margin-top: -5px; /* centra el pulgar (18px) sobre la pista (8px) */
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 50%, #22c55e 0%, #ef4444 100%);
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+.volume-gradient::-moz-range-track {
+  height: 8px;
+  border-radius: 9999px;
+  background: linear-gradient(to right, #22c55e 0%, #eab308 55%, #ef4444 100%);
+}
+
+.volume-gradient::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 50% 50%, #22c55e 0%, #ef4444 100%);
+  border: 2px solid #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
+}
+
+.volume-gradient:focus-visible {
+  outline: 2px solid #38bdf8;
+  outline-offset: 3px;
+  border-radius: 9999px;
 }
 
 input[type="range"] {
