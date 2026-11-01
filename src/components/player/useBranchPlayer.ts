@@ -14,6 +14,7 @@
 //  · Suscripción Realtime a la sucursal: alertas urgentes y recarga remota.
 
 import { useEffect, useRef, useState } from "react";
+import type { RealtimeChannel } from "@supabase/supabase-js";
 import { getSupabase, supabaseEnvProblem } from "@/lib/supabase/client";
 import {
   branchLocalTime,
@@ -59,6 +60,8 @@ export interface PlayerState {
   muted: boolean;
   alert: AlertPayload | null;
   realtime: string | null;
+  /** Imagen de fondo elegida por el administrador (null = degradado por defecto). */
+  backgroundUrl: string | null;
 }
 
 export interface PlayerControls {
@@ -69,6 +72,12 @@ export interface PlayerControls {
   toggleMute: () => void;
   reload: () => void;
   dismissAlert: () => void;
+}
+
+/** Acceso de la interfaz al análisis de audio (ondas/visualizadores). */
+export interface PlayerEngine {
+  /** Analyser FFT conectado al audio; null mientras Web Audio no arranque. */
+  analyser: AnalyserNode | null;
 }
 
 const HEARTBEAT_MS = 15_000;
@@ -95,9 +104,12 @@ export function useBranchPlayer(branchKey: string) {
     muted: false,
     alert: null,
     realtime: null,
+    backgroundUrl: null,
   }));
 
   const controlsRef = useRef<PlayerControls | null>(null);
+  // Expuesto a la UI para dibujar ondas reales del audio (FFT).
+  const engineRef = useRef<PlayerEngine>({ analyser: null });
 
   useEffect(() => {
     let disposed = false;
@@ -134,6 +146,10 @@ export function useBranchPlayer(branchKey: string) {
 
     const audio = new Audio();
     audio.preload = "auto";
+    // CORS: Supabase Storage responde con Access-Control-Allow-Origin (el
+    // fetch de blobs ya lo exige). Sin esto, enrutar el elemento por Web
+    // Audio emitiría silencio con URLs remotas.
+    audio.crossOrigin = "anonymous";
 
     let cfg: BranchBroadcast | null = null;
     let assignment: BroadcastAssignment | null = null;
@@ -149,23 +165,80 @@ export function useBranchPlayer(branchKey: string) {
     let pausedByUser = false;
     let alertActive = false;
     let resumeAfterAlert = false;
+    // true si la duración en pantalla del último aviso depende del audio.
+    let audioHoldSet = false;
     let attempt = 0;
     let beats = 0;
     let status: PlayerStatus = "idle";
     let netOk = typeof navigator === "undefined" ? true : navigator.onLine;
 
     const cache = new Map<string, string>();
+    // Pistas que este navegador no puede decodificar (códec/contenedor no
+    // soportado o archivo corrupto): se saltan y nunca se reintentan.
+    const badItems = new Set<string>();
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
     let alertTimer: ReturnType<typeof setTimeout> | null = null;
     let alertAudio: HTMLAudioElement | null = null;
     let heartbeat: ReturnType<typeof setInterval> | null = null;
+    // Canal Realtime de la sucursal (presencia + alertas). Se expone aquí
+    // para que trackPresence() funcione antes/después de su creación.
+    let channelRef: RealtimeChannel | null = null;
+    // Visualizador Web Audio (FFT para la onda del héroe).
+    let audioCtx: AudioContext | null = null;
+    let analyserNode: AnalyserNode | null = null;
+    let sourceNode: MediaElementAudioSourceNode | null = null;
 
     // ---------- utilidades ----------
     const patch = (p: Partial<PlayerState>) => {
       if (disposed) return;
+      const previous = status;
       if (p.status) status = p.status;
       setState((s) => ({ ...s, ...p }));
+      // Avisar al panel (presencia) cuando cambia el estado o el tema que
+      // suena: así dice en vivo qué se está reproduciendo de verdad.
+      if ((p.status && p.status !== previous) || p.now !== undefined) {
+        trackPresence();
+      }
     };
+
+    /**
+     * Presencia Realtime: mientras la pantalla de la sucursal esté abierta
+     * publica `{ started, playing, track }` en el canal `branch:<key>`. El
+     * panel la lee para saber al instante si un link está en uso, si está
+     * sonando y **qué pista suena ahora** — sin depender del log en BD (que
+     * puede fallar o atrasarse) ni de que el websocket del admin esté sano.
+     */
+    function trackPresence() {
+      if (!channelRef) return;
+      void channelRef
+        .track({
+          started,
+          playing: status === "playing",
+          track: currentItem
+            ? `${currentItem.title}${currentItem.artist ? ` — ${currentItem.artist}` : ""}`
+            : null,
+        })
+        .catch(() => undefined);
+    }
+
+    /**
+     * Latido inmediato: se dispara al abrir la pestaña o al volver de estar
+     * dormida (los temporizadores de fondo se ralentizan y podían dejar el
+     * last_ping fuera de la ventana de «En línea» aunque sí sonara).
+     */
+    async function pingNow(): Promise<void> {
+      if (disposed) return;
+      const { error } = await supabase.rpc("branch_ping", {
+        p_branch_key: branchKey,
+      });
+      if (disposed) return;
+      if (!error) {
+        netOk = true;
+        return;
+      }
+      netOk = false;
+      if (started) scheduleRetry(recover);
+    }
 
     const backoff = () =>
       Math.min(MAX_BACKOFF_MS, 1000 * 2 ** Math.min(attempt, 5)) +
@@ -189,7 +262,11 @@ export function useBranchPlayer(branchKey: string) {
       if (error) throw error;
       if (disposed) return;
       cfg = data as unknown as BranchBroadcast;
-      patch({ branchName: cfg.branch.name, timezone: cfg.branch.timezone });
+      patch({
+        branchName: cfg.branch.name,
+        timezone: cfg.branch.timezone,
+        backgroundUrl: cfg.settings?.player_background || null,
+      });
     }
 
     async function logPlay(trackId: string) {
@@ -285,6 +362,11 @@ export function useBranchPlayer(branchKey: string) {
         });
         return;
       }
+      if (name === "NotSupportedError") {
+        // Formato que el navegador no soporta: saltar a la siguiente pista.
+        skipBadItem(item);
+        return;
+      }
       if (name === "AbortError") return; // fuente sustituida a mitad de carga
 
       netOk = false;
@@ -303,6 +385,23 @@ export function useBranchPlayer(branchKey: string) {
         if (disposed || currentItem?.id !== item.id) return;
         void playItem(item, isSpot);
       });
+    }
+
+    /**
+     * El navegador no puede decodificar esta pista (formato/códec no
+     * soportado o datos corruptos): se marca como mala y se pasa a la
+     * siguiente. Un archivo que nunca va a sonar no debe reintentarse, para
+     * no atascar la emisión de la sucursal.
+     */
+    function skipBadItem(item: BroadcastTrack) {
+      if (badItems.has(item.id)) return; // ya gestionada (evento + promesa)
+      badItems.add(item.id);
+      console.warn("[luxor] pista no reproducible, se omite:", item.title);
+      if (currentItem?.id === item.id) currentItem = null;
+      patch({ status: "syncing", message: "Formato no soportado; saltando…" });
+      setTimeout(() => {
+        if (!disposed && started) void next();
+      }, 600);
     }
 
     async function playItem(item: BroadcastTrack, isSpot: boolean): Promise<void> {
@@ -385,12 +484,30 @@ export function useBranchPlayer(branchKey: string) {
         if (item) {
           isSpot = true;
           commercialCursor += 1;
+          // Spot que este navegador no puede decodificar: se omite y sigue
+          // la música sin cortar la emisión.
+          if (badItems.has(item.id)) item = null;
         }
       }
 
       if (!item) {
-        qi = (qi + 1) % queue.length;
-        item = queue[qi];
+        // Avanzar por la cola saltando las pistas marcadas como no
+        // reproducibles en este navegador (nunca en bucle: si toda la cola
+        // es mala se detiene con un error claro).
+        let guard = 0;
+        do {
+          qi = (qi + 1) % queue.length;
+          item = queue[qi];
+          guard += 1;
+        } while (item && badItems.has(item.id) && guard <= queue.length);
+
+        if (item && badItems.has(item.id)) {
+          patch({
+            status: "error",
+            message: "Ninguna pista de la playlist es reproducible en este navegador",
+          });
+          return;
+        }
       }
 
       if (!item) {
@@ -490,8 +607,21 @@ export function useBranchPlayer(branchKey: string) {
         alertAudio = null;
       }
       alertActive = false;
+      audioHoldSet = false;
       patch({ alert: null });
       if (resumeAfterAlert && !pausedByUser && started) {
+        void audio.play().catch(() => undefined);
+      }
+      resumeAfterAlert = false;
+    }
+
+    /**
+     * La música se reanuda al terminar el spot de alerta SIN cerrar el
+     * mensaje si aún queda periodo estático por cumplir (el cierre lo
+     * gobierna alertTimer / «Entendido»).
+     */
+    function resumeMusicAfterSpot() {
+      if (resumeAfterAlert && !pausedByUser && started && !disposed) {
         void audio.play().catch(() => undefined);
       }
       resumeAfterAlert = false;
@@ -501,27 +631,128 @@ export function useBranchPlayer(branchKey: string) {
       if (disposed || !payload) return;
       if (alertActive) finishAlert();
 
-      resumeAfterAlert = !audio.paused;
-      alertActive = true;
-      patch({ alert: payload, status: "syncing", message: "Aviso prioritario" });
-      audio.pause();
+      const hasAudio = Boolean(payload.audio_url);
+      const explicitHold =
+        typeof payload.hold_seconds === "number" && payload.hold_seconds >= 0
+          ? payload.hold_seconds
+          : null;
 
-      const holdMs = Math.min(
+      // La música sólo se silencia si el aviso trae audio (spot).
+      resumeAfterAlert = hasAudio && !audio.paused;
+      alertActive = true;
+      audioHoldSet = false;
+      patch({ alert: payload });
+      if (hasAudio) {
+        patch({ status: "syncing", message: "Aviso prioritario" });
+        audio.pause();
+      }
+
+      // Reserva para mensajes sólo texto (también usada si el audio falla).
+      const textHoldMs = Math.min(
         30_000,
         Math.max(8_000, (payload.message?.length ?? 0) * 90),
       );
-      alertTimer = setTimeout(finishAlert, holdMs);
 
-      if (payload.audio_url) {
+      if (explicitHold !== null) {
+        // Permanencia elegida por el operador: 0 = hasta «Entendido».
+        if (explicitHold > 0) alertTimer = setTimeout(finishAlert, explicitHold * 1000);
+      } else if (!hasAudio) {
+        // Sólo texto: el mensaje se cierra solo… y la música NO se corta.
+        alertTimer = setTimeout(finishAlert, textHoldMs);
+      }
+      // Con audio y sin periodo explícito: el mensaje dura exactamente lo
+      // que el spot (se programa al conocer la duración real del archivo).
+
+      if (hasAudio && payload.audio_url) {
         try {
           const el = new Audio(payload.audio_url);
           alertAudio = el;
-          el.onended = finishAlert;
-          el.onerror = finishAlert;
+
+          el.onloadedmetadata = () => {
+            if (disposed || !alertActive || explicitHold !== null) return;
+            if (Number.isFinite(el.duration) && el.duration > 0) {
+              if (alertTimer) clearTimeout(alertTimer);
+              alertTimer = setTimeout(finishAlert, Math.round(el.duration * 1000) + 700);
+              audioHoldSet = true;
+            } else if (!audioHoldSet) {
+              audioHoldSet = true;
+              alertTimer = setTimeout(finishAlert, textHoldMs);
+            }
+          };
+
+          el.onended = resumeMusicAfterSpot;
+          el.onerror = () => {
+            resumeMusicAfterSpot();
+            if (!audioHoldSet && explicitHold === null) {
+              audioHoldSet = true;
+              alertTimer = setTimeout(finishAlert, textHoldMs);
+            }
+          };
+
           await el.play();
+          // Seguridad: si no llegaron los metadatos, no dejar el mensaje
+          // pegado para siempre (salvo permanencia explícita).
+          if (!audioHoldSet && explicitHold === null) {
+            audioHoldSet = true;
+            alertTimer = setTimeout(finishAlert, textHoldMs + 10_000);
+          }
         } catch {
-          // sin audio: el aviso visual ya está en pantalla
+          resumeMusicAfterSpot();
+          if (!audioHoldSet && explicitHold === null) {
+            audioHoldSet = true;
+            alertTimer = setTimeout(finishAlert, textHoldMs);
+          }
         }
+      }
+    }
+
+    // ---------- visualizador (Web Audio) ----------
+    /**
+     * Conecta el elemento de audio a un AnalyserNode para que la interfaz
+     * dibuje la forma de onda real. **Sólo se rutea si el AudioContext está
+     * "running"**: si se ruteara en estado suspendido, la música saldría en
+     * silencio (pantallas con autoplay sin gesto), así que en ese caso la
+     * reproducción sigue su ruta normal y el análisis se conecta después,
+     * cuando haya un gesto del usuario.
+     */
+    function routeAudio() {
+      if (sourceNode || !audioCtx || audioCtx.state !== "running") return;
+      try {
+        sourceNode = audioCtx.createMediaElementSource(audio);
+        analyserNode = audioCtx.createAnalyser();
+        analyserNode.fftSize = 2048;
+        analyserNode.smoothingTimeConstant = 0.82;
+        sourceNode.connect(analyserNode);
+        analyserNode.connect(audioCtx.destination);
+        engineRef.current.analyser = analyserNode;
+      } catch {
+        sourceNode = null;
+        analyserNode = null;
+        engineRef.current.analyser = null;
+      }
+    }
+
+    /** Crea (una sola vez) el AudioContext y rutear el FFT si se puede. */
+    function ensureVisualizer() {
+      try {
+        if (!audioCtx) {
+          const Ctor =
+            window.AudioContext ??
+            (window as unknown as { webkitAudioContext?: typeof AudioContext })
+              .webkitAudioContext;
+          if (!Ctor) return;
+          audioCtx = new Ctor();
+        }
+        if (audioCtx.state === "suspended") {
+          void audioCtx
+            .resume()
+            .then(routeAudio)
+            .catch(() => undefined);
+          return;
+        }
+        routeAudio();
+      } catch {
+        /* sin Web Audio: la onda degrada a animación decorativa */
       }
     }
 
@@ -547,7 +778,10 @@ export function useBranchPlayer(branchKey: string) {
       });
     });
     audio.addEventListener("play", () => {
-      if (!alertActive && !disposed) patch({ status: "playing" });
+      if (disposed) return;
+      // Con audio fluyendo (y tras el gesto de inicio) el FFT ya puede rutear.
+      ensureVisualizer();
+      if (!alertActive) patch({ status: "playing" });
     });
     audio.addEventListener("pause", () => {
       if (disposed || alertActive || !started) return;
@@ -559,15 +793,49 @@ export function useBranchPlayer(branchKey: string) {
     audio.addEventListener("error", () => {
       if (disposed || !started || !audio.src || alertActive) return;
       if (!currentItem) return;
+      const code = audio.error?.code;
+      // 2 = datos corruptos · 4 = formato no soportado: irrecuperable,
+      // se salta la pista. El resto (1 = red) sí se reintenta.
+      if (code === 2 || code === 4) {
+        skipBadItem(currentItem);
+        return;
+      }
       netOk = false;
       patch({ status: "offline", message: "Error de reproducción; reintentando…" });
       retryItem(currentItem, currentIsSpot);
     });
 
     // ---------- red ----------
+    // Al volver a la vista (pestaña dormida/oculta o reconexión) se fuerza
+    // presencia + latido: los temporizadores en segundo plano se ralentizan y
+    // el last_ping podía quedar fuera de la ventana de «En línea» aunque el
+    // link siguiera sonando.
+    const resync = () => {
+      if (disposed) return;
+      trackPresence();
+      void pingNow();
+    };
+    const onVisible = () => {
+      if (!document.hidden) resync();
+    };
+    window.addEventListener("focus", resync);
+    document.addEventListener("visibilitychange", onVisible);
+
+    // Gesto del usuario: si el AudioContext quedó suspendido (autoplay sin
+    // permiso), se reanuda aquí para poder conectar el FFT sin cortar audio.
+    const onGesture = () => {
+      if (!audioCtx) return;
+      void audioCtx
+        .resume()
+        .then(routeAudio)
+        .catch(() => undefined);
+    };
+    window.addEventListener("pointerdown", onGesture);
+
     const onOnline = () => {
       netOk = true;
-      void recover();
+      resync();
+      if (started) void recover();
     };
     const onOffline = () => {
       netOk = false;
@@ -581,17 +849,25 @@ export function useBranchPlayer(branchKey: string) {
 
     // ---------- realtime ----------
     const channel = supabase.channel(`branch:${branchKey}`);
+    channelRef = channel;
     channel.on("broadcast", { event: "alert" }, ({ payload }) => {
       void showAlert(payload as unknown as AlertPayload);
     });
     channel.on("broadcast", { event: "reload" }, () => {
       void reload();
     });
-    channel.subscribe((s) => patch({ realtime: s }));
+    channel.subscribe((s) => {
+      patch({ realtime: s });
+      if (s === "SUBSCRIBED") {
+        // El canal acaba de (re)conectar: republicar presencia y latido.
+        trackPresence();
+        void pingNow();
+      }
+    });
 
     // ---------- latido + refresco periódico ----------
     heartbeat = setInterval(async () => {
-      if (disposed || !started) return;
+      if (disposed) return;
       beats += 1;
 
       const { error } = await supabase.rpc("branch_ping", {
@@ -604,10 +880,11 @@ export function useBranchPlayer(branchKey: string) {
         if (status === "playing" || status === "syncing") {
           patch({ status: "offline", message: "Conexión inestable…" });
         }
-        scheduleRetry(recover);
+        if (started) scheduleRetry(recover);
       } else if (!netOk) {
-        void recover();
-      } else if (beats % 4 === 0) {
+        netOk = true;
+        if (started) void recover();
+      } else if (started && beats % 4 === 0) {
         // Cada ~1 minuto refresca la configuración por si no llegó el broadcast.
         void reload();
       }
@@ -671,11 +948,22 @@ export function useBranchPlayer(branchKey: string) {
       audio.removeAttribute("src");
       window.removeEventListener("online", onOnline);
       window.removeEventListener("offline", onOffline);
+      window.removeEventListener("focus", resync);
+      document.removeEventListener("visibilitychange", onVisible);
+      window.removeEventListener("pointerdown", onGesture);
+      engineRef.current.analyser = null;
+      try {
+        analyserNode?.disconnect();
+        sourceNode?.disconnect();
+      } catch {
+        /* nodos ya desconectados */
+      }
+      void audioCtx?.close().catch(() => undefined);
       cache.forEach((url) => URL.revokeObjectURL(url));
       cache.clear();
       controlsRef.current = null;
     };
   }, [branchKey]);
 
-  return { state, controls: controlsRef };
+  return { state, controls: controlsRef, engine: engineRef };
 }

@@ -13,14 +13,19 @@ import { Button, ErrorNote, Field, Input, inputClass } from "@/components/ui";
 export default function AlertPanel({
   branches,
   onClose,
+  initialTarget = "all",
 }: {
   branches: Branch[];
   onClose: () => void;
+  /** Sucursal preseleccionada ("all" o el id de una sucursal). */
+  initialTarget?: string;
 }) {
-  const [target, setTarget] = useState<string>("all");
+  const [target, setTarget] = useState<string>(initialTarget);
   const [title, setTitle] = useState("Aviso importante");
   const [message, setMessage] = useState("");
   const [audioTrackId, setAudioTrackId] = useState("");
+  // "" = automático; número = segundos estáticos; "0" = permanente.
+  const [hold, setHold] = useState("");
   const [commercials, setCommercials] = useState<Track[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<string | null>(null);
@@ -65,17 +70,20 @@ export default function AlertPanel({
 
     const audio = commercials.find((t) => t.id === audioTrackId);
 
+    const payload: Record<string, unknown> = {
+      id: crypto.randomUUID(),
+      title: title.trim() || "Aviso prioritario",
+      message: message.trim(),
+      audio_url: audio?.file_url ?? null,
+      sent_at: new Date().toISOString(),
+    };
+    if (hold !== "") payload.hold_seconds = Number(hold);
+
     setSending(true);
     const { sent, failed } = await broadcastToBranches(
       targets.map((b) => b.branch_key),
       "alert",
-      {
-        id: crypto.randomUUID(),
-        title: title.trim() || "Aviso prioritario",
-        message: message.trim(),
-        audio_url: audio?.file_url ?? null,
-        sent_at: new Date().toISOString(),
-      },
+      payload,
     );
     setSending(false);
 
@@ -96,11 +104,11 @@ export default function AlertPanel({
         className="absolute inset-0 bg-black/50 backdrop-blur-sm"
       />
       {/* Panel modal */}
-      <div className="relative z-10 m-4 w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl sm:m-6">
+      <div className="relative z-10 m-4 w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-surface shadow-2xl sm:m-6">
         <div className="flex items-start justify-between gap-3 border-b border-slate-200 px-5 py-4">
           <div>
             <h2 className="flex items-center gap-2 text-base font-bold text-slate-900">
-              <Mic size={18} className="text-rose-600" />
+              <Mic size={18} className="text-rose-500" />
               Control en vivo
             </h2>
             <p className="mt-0.5 text-sm text-slate-500">
@@ -110,7 +118,7 @@ export default function AlertPanel({
           <button
             onClick={onClose}
             aria-label="Cerrar"
-            className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600"
+            className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-50 hover:text-slate-900"
           >
             <X size={18} />
           </button>
@@ -138,7 +146,7 @@ export default function AlertPanel({
         </Field>
 
         <div className="sm:col-span-2">
-          <Field label="Mensaje" hint="Se muestra en pantalla durante ~1 s por carácter (mín. 8 s).">
+          <Field label="Mensaje" hint="Ajusta aquí abajo cuánto tiempo permanece en pantalla y si se corta la música.">
             <textarea
               value={message}
               onChange={(e) => setMessage(e.target.value)}
@@ -148,6 +156,25 @@ export default function AlertPanel({
             />
           </Field>
         </div>
+
+        <Field
+          label="Permanencia del mensaje"
+          hint="Automático: dura lo mismo que el spot si hay audio; si es solo texto (~1 s por carácter) no se corta la música."
+        >
+          <select
+            value={hold}
+            onChange={(e) => setHold(e.target.value)}
+            className={inputClass}
+          >
+            <option value="">Automático</option>
+            <option value="15">Estático 15 segundos</option>
+            <option value="30">Estático 30 segundos</option>
+            <option value="60">Estático 1 minuto</option>
+            <option value="120">Estático 2 minutos</option>
+            <option value="300">Estático 5 minutos</option>
+            <option value="0">Permanente (hasta «Entendido»)</option>
+          </select>
+        </Field>
 
         <Field label="Audio de alerta (opcional)">
           <select
@@ -164,7 +191,7 @@ export default function AlertPanel({
           </select>
         </Field>
 
-        <div className="flex items-end">
+        <div className="sm:col-span-2">
           <Button type="submit" disabled={sending} className="flex w-full items-center justify-center gap-2">
             {sending ? "Enviando…" : (<><Megaphone size={16} /> Enviar alerta</>)}
           </Button>

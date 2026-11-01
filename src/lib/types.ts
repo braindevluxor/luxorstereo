@@ -95,6 +95,8 @@ export interface BranchBroadcast {
     timezone: string;
     active: boolean;
   };
+  /** Ajustes globales del reproductor (clave/valor), p. ej. player_background. */
+  settings?: Record<string, string | null> | null;
   assignments: BroadcastAssignment[];
   commercials: BroadcastTrack[];
   server_time: string;
@@ -106,4 +108,12 @@ export interface AlertPayload {
   message: string;
   audio_url?: string | null;
   sent_at: string;
+  /**
+   * Permanencia del mensaje en pantalla (segundos), decidida por el emisor:
+   *  · undefined → automático: duración del spot si hay audio; si es sólo
+   *    texto, ~1 s por carácter (8–30 s) sin silenciar la música.
+   *  · > 0 → estático durante ese tiempo.
+   *  · 0 → permanente hasta que la sucursal pulse «Entendido».
+   */
+  hold_seconds?: number;
 }

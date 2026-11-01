@@ -1,9 +1,11 @@
 "use client";
 
-// Vista ligera para la sucursal (tablet, PC o Raspberry Pi con navegador).
+// Vista de la sucursal (tablet, PC o Raspberry Pi con navegador): hero a
+// pantalla completa con la imagen de fondo elegida por el administrador
+// (o un degradado corporativo si no hay imagen) + barra inferior de control.
 // Se deja abierta en pantalla completa: /branch?key=<branch_key>
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import {
   Megaphone,
   Music2,
@@ -16,7 +18,11 @@ import {
   VolumeX,
 } from "lucide-react";
 import { formatDuration } from "@/lib/schedule";
-import { useBranchPlayer, type PlayerStatus } from "./useBranchPlayer";
+import {
+  useBranchPlayer,
+  type PlayerEngine,
+  type PlayerStatus,
+} from "./useBranchPlayer";
 
 const STATUS_META: Record<
   PlayerStatus,
@@ -31,6 +37,143 @@ const STATUS_META: Record<
   blocked: { label: "Requiere inicio", dot: "bg-amber-400 animate-pulse", chip: "bg-amber-50 text-amber-700 ring-amber-200" },
   error: { label: "Error", dot: "bg-rose-500", chip: "bg-rose-50 text-rose-700 ring-rose-200" },
 };
+
+// Palabra gigante del hero según el estado (estilo referencia "PLAY.").
+const HERO_WORD: Record<PlayerStatus, string> = {
+  idle: "ON AIR.",
+  connecting: "ON AIR.",
+  syncing: "ON AIR.",
+  playing: "PLAY.",
+  paused: "PAUSE.",
+  offline: "LIVE.",
+  blocked: "START.",
+  error: "ON AIR.",
+};
+
+// Onda sonora a la altura de la palabra del héroe: dibuja la forma de onda
+// REAL del audio (AnalyserNode del motor) mientras reproduce; si aún no hay
+// análisis (pausa, Web Audio no disponible) muestra una onda decorativa suave
+// que late con la reproducción.
+function SoundWave({
+  engine,
+  playing,
+}: {
+  engine: RefObject<PlayerEngine>;
+  playing: boolean;
+}) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const samples = new Uint8Array(2048);
+    let raf = 0;
+    let t = 0;
+
+    const frame = () => {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = canvas.clientWidth;
+      const h = canvas.clientHeight;
+      if (w === 0 || h === 0) return;
+      const pw = Math.round(w * dpr);
+      const ph = Math.round(h * dpr);
+      if (canvas.width !== pw || canvas.height !== ph) {
+        canvas.width = pw;
+        canvas.height = ph;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, w, h);
+
+      t += 0.035;
+      const mid = h / 2;
+      const analyser = engine.current.analyser;
+      const live = playing && analyser !== null;
+      if (live && analyser) analyser.getByteTimeDomainData(samples);
+
+      ctx.beginPath();
+      for (let x = 0; x <= w; x += 2) {
+        const p = x / w;
+        let y: number;
+        if (live && analyser) {
+          // Muestreo real de la señal de audio (128 = línea recta).
+          const idx = Math.min(samples.length - 1, Math.round(p * (samples.length - 1)));
+          y = mid + ((samples[idx] - 128) / 128) * (h * 0.46);
+        } else {
+          // Onda decorativa: plana en pausa, viva al reproducir.
+          const env = playing ? 1 : 0.25;
+          y = mid + Math.sin(p * 14 + t) * Math.sin(p * 3 - t * 0.7) * (h * 0.3) * env;
+        }
+        if (x === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+
+      // Color en ciclo: la onda recorre cian → azul → violeta → rosa y
+      // vuelve, distinto en cada tramo y cambiando con el tiempo.
+      const phase = (t * 10) % 360;
+      const hue = (p: number) => Math.round((phase + p * 120) % 360);
+      const grad = ctx.createLinearGradient(0, 0, w, 0);
+      grad.addColorStop(0, `hsla(${hue(0)}, 95%, 62%, 0)`);
+      grad.addColorStop(0.15, `hsla(${hue(0.15)}, 95%, 62%, 0.85)`);
+      grad.addColorStop(0.5, `hsla(${hue(0.5)}, 95%, 62%, 0.95)`);
+      grad.addColorStop(0.85, `hsla(${hue(0.85)}, 95%, 62%, 0.85)`);
+      grad.addColorStop(1, `hsla(${hue(1)}, 95%, 62%, 0)`);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 2.5;
+      ctx.lineJoin = "round";
+      ctx.shadowColor = `hsla(${hue(0.5)}, 95%, 62%, 0.9)`;
+      ctx.shadowBlur = 12;
+      ctx.stroke();
+    };
+
+    if (reduce) {
+      // Sin animación continua: un solo trazo estático (respeta la preferencia).
+      frame();
+      window.addEventListener("resize", frame);
+      return () => window.removeEventListener("resize", frame);
+    }
+
+    const loop = () => {
+      frame();
+      raf = requestAnimationFrame(loop);
+    };
+    loop();
+    return () => cancelAnimationFrame(raf);
+  }, [engine, playing]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      className="pointer-events-none absolute left-1/2 top-1/2 h-44 w-[200vw] -translate-x-1/2 -translate-y-1/2"
+      aria-hidden="true"
+    />
+  );
+}
+
+// Ecualizador decorativo de la barra inferior (se anima al reproducir).
+function Equalizer({ active }: { active: boolean }) {
+  return (
+    <span className="flex h-9 items-end gap-[3px]" aria-hidden="true">
+      {Array.from({ length: 24 }, (_, i) => (
+        <span
+          key={i}
+          className={active ? "eq-bar" : ""}
+          style={{
+            width: 3,
+            height: `${25 + ((i * 37) % 75)}%`,
+            borderRadius: 2,
+            backgroundColor:
+              i % 3 === 0 ? "#38bdf8" : "rgba(255,255,255,0.45)",
+            animationDelay: `${(i % 7) * 0.13}s`,
+          }}
+        />
+      ))}
+    </span>
+  );
+}
 
 function useClock(timeZone: string | null): string {
   const [now, setNow] = useState(() => new Date());
@@ -54,18 +197,35 @@ function useClock(timeZone: string | null): string {
 }
 
 export default function BranchPlayer({ branchKey }: { branchKey: string }) {
-  const { state, controls } = useBranchPlayer(branchKey);
+  const { state, controls, engine } = useBranchPlayer(branchKey);
   const clock = useClock(state.timezone);
   const meta = STATUS_META[state.status];
   const now = state.now;
   const progress = now && now.duration > 0 ? Math.min(1, state.progress / now.duration) : 0;
+  const playing = state.status === "playing";
 
   return (
-    <main className="min-h-dvh px-4 py-6 sm:px-8">
+    <main className="relative flex min-h-dvh flex-col overflow-hidden text-white">
+      {/* Fondo: imagen configurada por el administrador (o degradado por defecto) */}
+      <div
+        className="absolute inset-0 bg-cover bg-center"
+        style={
+          state.backgroundUrl
+            ? { backgroundImage: `url("${state.backgroundUrl}")` }
+            : {
+                backgroundImage:
+                  "radial-gradient(1000px 600px at 20% 0%, rgba(37,99,235,0.55), transparent 60%), radial-gradient(800px 500px at 100% 20%, rgba(56,189,248,0.35), transparent 55%), linear-gradient(160deg, #0a0e17 0%, #0d1526 100%)",
+              }
+        }
+      />
+      {/* Legibilidad del texto sobre cualquier imagen */}
+      <div className="absolute inset-0 bg-gradient-to-r from-black/90 via-black/55 to-black/20" />
+      <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-transparent to-black/55" />
+
       {/* Aviso prioritario en vivo */}
       {state.alert && (
         <div className="fixed inset-x-0 top-0 z-50 mx-auto max-w-3xl px-4 pt-4">
-          <div className="flex items-start gap-3 rounded-2xl border border-rose-300 bg-rose-600 p-4 shadow-xl">
+          <div className="flex items-start gap-3 rounded-2xl border border-rose-500/50 bg-rose-600/95 p-4 shadow-2xl backdrop-blur">
             <TriangleAlert size={22} className="mt-0.5 shrink-0 text-white" />
             <div className="flex-1">
               <p className="text-sm font-black uppercase tracking-wider text-white">
@@ -83,95 +243,125 @@ export default function BranchPlayer({ branchKey }: { branchKey: string }) {
         </div>
       )}
 
-      <div className="mx-auto flex min-h-dvh max-w-3xl flex-col">
-        {/* Encabezado */}
-        <header className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <span className="brand-gradient flex h-9 w-9 items-center justify-center rounded-xl text-white">
-              <Radio size={18} />
-            </span>
-            <div>
-              <p className="text-xs font-bold uppercase tracking-[0.3em] text-blue-400">
-                LuxorStereo
-              </p>
-              <h1 className="text-xl font-bold text-slate-900 sm:text-2xl">
-                {state.branchName ?? "Sucursal"}
-              </h1>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="font-mono text-lg text-slate-700">{clock}</span>
-            <span
-              className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-bold ring-1 ${meta.chip}`}
-            >
-              <span className={`h-2 w-2 rounded-full ${meta.dot}`} />
-              {meta.label}
-            </span>
-          </div>
-        </header>
-
-        {/* Ahora suena */}
-        <section className="mt-8 rounded-3xl border border-slate-200 bg-surface p-6 shadow-2xl sm:p-8">
-          <div className="flex items-center justify-between gap-4">
-            <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-widest text-slate-500">
-              {now?.kind === "commercial" ? (
-                <>
-                  <Megaphone size={14} className="text-amber-600" /> Spot publicitario
-                </>
-              ) : (
-                <>
-                  <Music2 size={14} className="text-blue-600" /> Ahora suena
-                </>
-              )}
+      {/* Cabecera */}
+      <header className="relative z-20 flex flex-wrap items-center justify-between gap-3 px-5 py-4 sm:px-10 sm:py-6">
+        <div className="flex items-center gap-3">
+          <span className="brand-gradient flex h-10 w-10 items-center justify-center rounded-xl text-white shadow-lg shadow-blue-900/50">
+            <Radio size={20} />
+          </span>
+          <div>
+            <p className="text-[11px] font-black uppercase tracking-[0.35em] text-white/60">
+              LuxorStereo
             </p>
-            <p className="max-w-[50%] truncate text-xs font-semibold text-blue-600">
-              {state.playlistName ?? ""}
-            </p>
+            <h1 className="text-lg font-bold text-white">
+              {state.branchName ?? "Sucursal"}
+            </h1>
           </div>
+        </div>
+        <div className="flex items-center gap-3">
+          <span className="font-mono text-lg text-white/90">{clock}</span>
+          <span
+            className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-bold ring-1 ${meta.chip}`}
+            title={state.message}
+          >
+            <span className={`h-2 w-2 rounded-full ${meta.dot}`} />
+            {meta.label}
+          </span>
+        </div>
+      </header>
 
-          <h2 className="mt-3 truncate text-3xl font-black text-slate-900 sm:text-4xl">
-            {now?.title ?? "En espera…"}
-          </h2>
-          <p className="mt-1 truncate text-lg text-slate-500">
-            {now?.artist ?? "—"}
+      {/* Hero: palabra gigante + ahora suena */}
+      <section className="relative z-10 flex flex-1 items-center px-5 py-6 sm:px-10">
+        <div className="max-w-2xl">
+          <p className="flex items-center gap-2 text-xs font-bold uppercase tracking-[0.3em] text-sky-400">
+            {now?.kind === "commercial" ? (
+              <>
+                <Megaphone size={14} /> Spot publicitario
+              </>
+            ) : (
+              <>
+                <Music2 size={14} /> {state.playlistName ?? "Radio corporativa"}
+              </>
+            )}
           </p>
 
-          {/* Progreso */}
-          <div className="mt-6">
-            <div className="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+          <div className="relative mt-1">
+            {/* Onda sonora a la altura de la palabra (FFT real del audio) */}
+            <SoundWave engine={engine} playing={playing} />
+            <h2 className="relative text-[clamp(4rem,13vw,9.5rem)] font-black uppercase leading-[0.85] tracking-tight drop-shadow-[0_10px_40px_rgba(0,0,0,0.6)]">
+              {HERO_WORD[state.status]}
+            </h2>
+          </div>
+
+          <p className="mt-5 max-w-lg truncate text-lg font-bold text-white sm:text-xl">
+            {now?.title ?? "En espera…"}
+            {now?.artist ? ` — ${now.artist}` : ""}
+          </p>
+
+          {/* Fallo de configuración: aviso + reintento */}
+          {state.status === "error" && (
+            <div className="mt-5 max-w-md rounded-2xl border border-rose-500/40 bg-black/60 p-4 backdrop-blur">
+              <p className="flex items-center gap-2 text-sm font-semibold text-rose-400">
+                <TriangleAlert size={16} className="shrink-0" />
+                {state.message}
+              </p>
+              <button
+                onClick={() => controls.current?.reload()}
+                className="mt-3 rounded-xl bg-rose-600 px-4 py-2 text-sm font-bold text-white transition hover:bg-rose-500"
+              >
+                Reintentar
+              </button>
+            </div>
+          )}
+        </div>
+      </section>
+
+      {/* Barra inferior de control (estilo referencia) */}
+      <div className="relative z-20 px-4 pb-5 sm:px-10 sm:pb-8">
+        <div className="mx-auto flex max-w-5xl items-center gap-3 rounded-2xl bg-black/60 p-3 shadow-2xl ring-1 ring-white/10 backdrop-blur-xl sm:gap-4">
+          <img
+            src="/disco rojo.gif"
+            alt=""
+            className="h-14 w-14 shrink-0 rounded-xl object-cover"
+            draggable={false}
+          />
+
+          <div className="min-w-0">
+            <p className="text-[10px] font-black uppercase tracking-[0.25em] text-sky-400">
+              Sonando ahora
+            </p>
+            <p className="truncate text-sm font-bold text-white">
+              {now?.title ?? "En espera…"}
+            </p>
+            <p className="truncate text-xs text-white/60">{now?.artist ?? "—"}</p>
+          </div>
+
+          {/* Progreso + ecualizador (pantallas medianas en adelante) */}
+          <div className="hidden flex-1 items-center gap-4 md:flex">
+            <span className="font-mono text-[11px] text-white/60">
+              {formatDuration(state.progress)}
+            </span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-white/15">
               <div
-                className="h-full rounded-full bg-gradient-to-r from-blue-600 to-sky-400 transition-[width] duration-300 ease-linear"
+                className="h-full rounded-full bg-gradient-to-r from-blue-500 to-sky-400 transition-[width] duration-300 ease-linear"
                 style={{ width: `${progress * 100}%` }}
               />
             </div>
-            <div className="mt-2 flex justify-between font-mono text-xs text-slate-400">
-              <span>{formatDuration(state.progress)}</span>
-              <span>{formatDuration(now?.duration ?? 0)}</span>
-            </div>
+            <span className="font-mono text-[11px] text-white/60">
+              {formatDuration(now?.duration ?? 0)}
+            </span>
+            <Equalizer active={playing} />
           </div>
 
-          {/* Controles */}
-          <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-            <button
-              onClick={() => controls.current?.toggle()}
-              className="brand-gradient flex h-16 w-16 items-center justify-center rounded-full text-white shadow-lg shadow-blue-600/40 transition hover:brightness-110 active:scale-95"
-              aria-label={state.status === "playing" ? "Pausar" : "Reproducir"}
-            >
-              {state.status === "playing" ? (
-                <Pause size={26} fill="currentColor" />
-              ) : (
-                <Play size={26} fill="currentColor" />
-              )}
-            </button>
-
+          {/* Acciones */}
+          <div className="ml-auto flex shrink-0 items-center gap-2 sm:gap-3">
             <button
               onClick={() => controls.current?.toggleMute()}
-              className="rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-              aria-label="Silenciar"
+              className="hidden rounded-xl p-2.5 text-white/80 transition hover:bg-white/10 hover:text-white sm:block"
+              aria-label={state.muted ? "Activar sonido" : "Silenciar"}
             >
               {state.muted ? <VolumeX size={20} /> : <Volume2 size={20} />}
             </button>
-
             <input
               type="range"
               min={0}
@@ -179,75 +369,63 @@ export default function BranchPlayer({ branchKey }: { branchKey: string }) {
               step={0.01}
               value={state.muted ? 0 : state.volume}
               onChange={(e) => controls.current?.setVolume(Number(e.target.value))}
-              className="w-40"
+              className="hidden w-24 sm:block"
               aria-label="Volumen"
             />
-
             <button
               onClick={() => controls.current?.reload()}
-              className="flex items-center gap-2 rounded-xl border border-slate-300 px-4 py-3 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
+              className="hidden rounded-xl p-2.5 text-white/80 transition hover:bg-white/10 hover:text-white sm:block"
+              aria-label="Sincronizar"
+              title="Sincronizar con el centro"
             >
-              <RefreshCw size={16} />
-              Sincronizar
+              <RefreshCw size={18} />
             </button>
-          </div>
-        </section>
-
-        {/* Estado técnico */}
-        <footer className="mt-6 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-          <span>{state.message}</span>
-          <span className="flex items-center gap-3">
-            <span
-              className={
-                state.realtime === "SUBSCRIBED"
-                  ? "text-emerald-600"
-                  : "text-amber-600"
-              }
-            >
-              ● Tiempo real: {state.realtime ?? "…"}
-            </span>
-            <span>Latido 15 s</span>
-          </span>
-        </footer>
-
-        {/* Autorización de audio (política de autoplay del navegador) */}
-        {state.status === "blocked" && (
-          <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 backdrop-blur-sm">
-            <div className="mx-4 max-w-sm rounded-3xl border border-slate-200 bg-surface p-8 text-center shadow-2xl">
-              <span className="brand-gradient mx-auto flex h-14 w-14 items-center justify-center rounded-2xl text-white">
-                <Volume2 size={28} />
-              </span>
-              <h3 className="mt-4 text-xl font-bold text-slate-900">
-                Iniciar reproducción
-              </h3>
-              <p className="mt-2 text-sm text-slate-500">
-                El navegador requiere un gesto del usuario para reproducir audio.
-                Pulsa una vez al abrir la pantalla de esta sucursal.
-              </p>
-              <button
-                onClick={() => controls.current?.toggle()}
-                className="brand-gradient mt-6 flex w-full items-center justify-center gap-2 rounded-2xl px-6 py-4 text-base font-bold text-white transition hover:brightness-110"
-              >
-                <Play size={20} fill="currentColor" />
-                Comenzar
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Fallo de configuración: pantalla de reintento */}
-        {state.status === "error" && (
-          <div className="mt-6 rounded-2xl border border-rose-200 bg-rose-50 p-5 text-center">
-            <p className="font-semibold text-rose-700">{state.message}</p>
             <button
-              onClick={() => controls.current?.reload()}
-              className="mt-3 rounded-xl bg-rose-600 px-5 py-2.5 text-sm font-bold text-white transition hover:bg-rose-500"
+              onClick={() => controls.current?.toggle()}
+              className="flex h-14 w-14 items-center justify-center rounded-full bg-white text-black shadow-lg transition hover:scale-105 active:scale-95"
+              aria-label={playing ? "Pausar" : "Reproducir"}
             >
-              Reintentar
+              {playing ? (
+                <Pause size={24} fill="currentColor" />
+              ) : (
+                <Play size={24} fill="currentColor" className="ml-0.5" />
+              )}
             </button>
           </div>
-        )}
+        </div>
+
+        <p
+          className="mt-2 text-center text-[11px] text-white/40"
+          title={state.message}
+        >
+          {state.message} · {state.realtime === "SUBSCRIBED" ? "en vivo" : `tiempo real: ${state.realtime ?? "…"}`} · latido 15 s
+        </p>
       </div>
+
+      {/* Autorización de audio (política de autoplay del navegador) */}
+      {state.status === "blocked" && (
+        <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/80 backdrop-blur-sm">
+          <div className="mx-4 max-w-sm rounded-3xl border border-white/10 bg-[#101725] p-8 text-center shadow-2xl">
+            <span className="brand-gradient mx-auto flex h-14 w-14 items-center justify-center rounded-2xl text-white">
+              <Volume2 size={28} />
+            </span>
+            <h3 className="mt-4 text-xl font-bold text-white">
+              Iniciar reproducción
+            </h3>
+            <p className="mt-2 text-sm text-white/60">
+              El navegador requiere un gesto del usuario para reproducir audio.
+              Pulsa una vez al abrir la pantalla de esta sucursal.
+            </p>
+            <button
+              onClick={() => controls.current?.toggle()}
+              className="brand-gradient mt-6 flex w-full items-center justify-center gap-2 rounded-2xl px-6 py-4 text-base font-bold text-white transition hover:brightness-110"
+            >
+              <Play size={20} fill="currentColor" />
+              Comenzar
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

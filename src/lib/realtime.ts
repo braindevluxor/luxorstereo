@@ -3,10 +3,16 @@
 // Emisión de eventos a los reproductores de sucursal mediante canales
 // públicos de Supabase Realtime (broadcast). El nombre del canal incluye el
 // branch_key, de modo que sólo quien conoce la sucursal puede escucharla.
+//
+// El envío usa la API REST de Realtime (`httpSend`), SIN suscribirse al
+// canal: así nunca choca con el canal de presencia que el panel ya tiene
+// abierto con el mismo tópico (`channel()` reutiliza la instancia existente
+// y re-suscribirse a un tópico ya unido nunca confirma el estado → el envío
+// fallaba con «Ninguna sucursal confirmó la recepción»), y se entrega aunque
+// el websocket de ESTE cliente esté caído: sólo hace falta que esté conectado
+// el reproductor de la sucursal.
 
 import { getSupabase } from "@/lib/supabase/client";
-
-const JOIN_TIMEOUT_MS = 5_000;
 
 export async function broadcastToBranch(
   branchKey: string,
@@ -14,34 +20,23 @@ export async function broadcastToBranch(
   payload: unknown,
 ): Promise<boolean> {
   const supabase = getSupabase();
-  const channel = supabase.channel(`branch:${branchKey}`);
+  const topic = `branch:${branchKey}`;
+
+  // `channel()` devuelve la instancia ya existente si el tópico está creado
+  // (p. ej. la del hook de presencia del panel): sólo se retira del cliente
+  // la que se cree aquí para enviar, nunca una ajena.
+  const preexisting = supabase
+    .getChannels()
+    .some((c) => c.topic === `realtime:${topic}`);
+  const channel = supabase.channel(topic);
 
   try {
-    const joined = await new Promise<boolean>((resolve) => {
-      const timer = setTimeout(() => resolve(false), JOIN_TIMEOUT_MS);
-      channel.subscribe((status) => {
-        if (status === "SUBSCRIBED") {
-          clearTimeout(timer);
-          resolve(true);
-        } else if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
-          clearTimeout(timer);
-          resolve(false);
-        }
-      });
-    });
-
-    if (!joined) return false;
-
-    const result = await channel.send({
-      type: "broadcast",
-      event,
-      payload,
-    });
-    return result === "ok";
+    const res = await channel.httpSend(event, payload);
+    return res.success;
   } catch {
     return false;
   } finally {
-    void supabase.removeChannel(channel);
+    if (!preexisting) void supabase.removeChannel(channel);
   }
 }
 

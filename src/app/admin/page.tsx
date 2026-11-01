@@ -1,15 +1,17 @@
 "use client";
 
-// Dashboard central: estado de sucursales, "ahora suena", historial en vivo
-// y control de alertas.
+// Dashboard central: creación de sucursales, estado en vivo (disco de
+// vinilo), acceso al enlace del reproductor y control de alertas.
+// Diseñado para caber en pantalla sin scroll: altura de viewport con
+// desplazamiento interno sólo en la lista de sucursales.
 
 import { useCallback, useEffect, useState } from "react";
-import Link from "next/link";
+import { Check, Copy, Mic, Music2, Plus, Trash2 } from "lucide-react";
 import { getSupabase } from "@/lib/supabase/client";
 import type { Branch, TrackType } from "@/lib/types";
 import AlertPanel from "@/components/admin/AlertPanel";
-import { Mic } from "lucide-react";
-import { Card, EmptyState, ErrorNote, Spinner } from "@/components/ui";
+import { useBranchUsage } from "@/components/admin/useBranchUsage";
+import { Button, Card, EmptyState, ErrorNote, Spinner, inputClass } from "@/components/ui";
 
 interface LogRow {
   id: string;
@@ -19,49 +21,63 @@ interface LogRow {
   branch: { name: string } | null;
 }
 
-const ONLINE_WINDOW_MS = 60_000;
+// Ventana de respaldo: si no hay presencia Realtime, se considera en línea
+// con un latido de hasta 2 minutos (los temporizadores en segundo plano del
+// navegador de la sucursal se ralentizan y no deben marcar falso offline).
+const ONLINE_WINDOW_MS = 120_000;
 
-// Disco de vinilo con el centro (etiqueta) en verde si la sucursal está en
-// Disco de vinilo (GIF animado de public/). El centro del GIF es rojo; cuando
-// la sucursal está activa/en línea se superpone un centro verde encima.
-// `size` controla el diámetro en píxeles.
-function VinylDisc({ online, size = 36 }: { online: boolean; size?: number }) {
+// Zona horaria fija para todas las sucursales (igual que en /admin/branches).
+const DEFAULT_TIMEZONE = "America/Caracas";
+
+// Disco de vinilo (GIF animado de public/). Gira sólo mientras la sucursal
+// está reproduciendo; el centro del disco es verde si el link está en línea
+// (presencia en vivo o latido reciente) y rojo si está desconectado.
+function VinylDisc({
+  online,
+  playing,
+  size = 36,
+}: {
+  online: boolean;
+  playing?: boolean;
+  size?: number;
+}) {
   const hole = Math.max(2, Math.round(size * 0.05)); // eje central
-  // El centro del GIF luce más grande que el disco CSS llena todo, así que cada
-  // estado dimensiona su propio centro para que visualmente coincidan.
   const labelActive = Math.max(6, Math.round(size * 0.42));
   const labelIdle = Math.max(6, Math.round(size * 0.36));
   return (
     <span
-      className="relative flex shrink-0 items-center justify-center overflow-hidden rounded-full"
+      className={`relative flex shrink-0 items-center justify-center overflow-hidden rounded-full ${
+        online
+          ? // En línea: aro neón verde que parpadea lentamente.
+            "neon-disc shadow-[0_0_6px_2px_rgba(52,211,153,0.75),0_0_18px_6px_rgba(16,185,129,0.4)]"
+          : ""
+      }`}
       style={{ width: size, height: size }}
       aria-hidden="true"
     >
-      {online ? (
-        // Activa: GIF animado (gira) con centro verde encima.
-        <>
-          <img
-            src="/disco rojo.gif"
-            alt=""
-            className="absolute left-1/2 top-1/2 h-[150%] w-[150%] max-w-none -translate-x-1/2 -translate-y-1/2 object-contain motion-reduce:hidden"
-            draggable={false}
-          />
-          <span
-            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full bg-emerald-500"
-            style={{ width: labelActive, height: labelActive }}
-          />
-        </>
+      {playing ? (
+        // Reproduciendo: GIF animado (gira).
+        <img
+          src="/disco rojo.gif"
+          alt=""
+          className="absolute left-1/2 top-1/2 h-[150%] w-[150%] max-w-none -translate-x-1/2 -translate-y-1/2 object-contain motion-reduce:hidden"
+          draggable={false}
+        />
       ) : (
-        // Inactiva / desconectada: disco fijo (no gira), centro rojo.
-        <>
-          <span className="absolute inset-0 rounded-full bg-slate-800 ring-1 ring-inset ring-slate-600/60" />
-          <span
-            className="absolute rounded-full bg-rose-500"
-            style={{ width: labelIdle, height: labelIdle }}
-          />
-        </>
+        // En pausa / link cerrado: disco fijo (no gira).
+        <span className="absolute inset-0 rounded-full bg-slate-800 ring-1 ring-inset ring-slate-600/60" />
       )}
-      {/* Eje central (común a ambos estados) */}
+      {/* Centro: verde = en línea, rojo = desconectada */}
+      <span
+        className={`absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full ${
+          online ? "bg-emerald-500" : "bg-rose-500"
+        }`}
+        style={{
+          width: online ? labelActive : labelIdle,
+          height: online ? labelActive : labelIdle,
+        }}
+      />
+      {/* Eje central (común a todos los estados) */}
       <span
         className="absolute rounded-full bg-slate-900"
         style={{ width: hole, height: hole }}
@@ -82,6 +98,10 @@ function relativeTime(iso: string | null, now: number): string {
   return `hace ${Math.round(minutes / 60)} h`;
 }
 
+function playerUrl(branchKey: string, origin: string) {
+  return `${origin}/branch?key=${branchKey}`;
+}
+
 export default function DashboardPage() {
   const [branches, setBranches] = useState<Branch[] | null>(null);
   const [logs, setLogs] = useState<LogRow[]>([]);
@@ -89,8 +109,14 @@ export default function DashboardPage() {
   const [playlistsCount, setPlaylistsCount] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
-  const [live, setLive] = useState(false);
-  const [alertOpen, setAlertOpen] = useState(false);
+  const [alertTarget, setAlertTarget] = useState<string | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Alta de sucursales desde el panel
+  const [showCreate, setShowCreate] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newCity, setNewCity] = useState("");
+  const [saving, setSaving] = useState(false);
 
   const load = useCallback(async () => {
     const supabase = getSupabase();
@@ -127,6 +153,20 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, []);
 
+  // Refresco periódico de latidos (respaldo si el evento Realtime no llega).
+  useEffect(() => {
+    const id = setInterval(() => void load(), 15_000);
+    return () => clearInterval(id);
+  }, [load]);
+
+  // Uso en vivo: qué links están abiertos/sonando (presencia Realtime).
+  const usage = useBranchUsage(branches);
+
+  const isOnline = (b: Branch) =>
+    b.active &&
+    (usage.has(b.id) ||
+      (!!b.last_ping && now - Date.parse(b.last_ping) < ONLINE_WINDOW_MS));
+
   // Realtime: inserciones de reproducciones y cambios de latido.
   useEffect(() => {
     const supabase = getSupabase();
@@ -146,7 +186,7 @@ export default function DashboardPage() {
           void load();
         },
       )
-      .subscribe((status) => setLive(status === "SUBSCRIBED"));
+      .subscribe();
 
     return () => {
       void supabase.removeChannel(channel);
@@ -158,53 +198,73 @@ export default function DashboardPage() {
     if (!nowPlaying.has(log.branch_id)) nowPlaying.set(log.branch_id, log);
   }
 
-  const onlineCount =
-    branches?.filter(
-      (b) =>
-        b.active &&
-        b.last_ping &&
-        now - Date.parse(b.last_ping) < ONLINE_WINDOW_MS,
-    ).length ?? 0;
+  const onlineCount = branches?.filter(isOnline).length ?? 0;
+
+  async function createBranch(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newName.trim()) return;
+    setSaving(true);
+    setError(null);
+    const { error: err } = await getSupabase()
+      .from("branches")
+      .insert({
+        name: newName.trim(),
+        city: newCity.trim() || null,
+        timezone: DEFAULT_TIMEZONE,
+      });
+    setSaving(false);
+    if (err) {
+      setError(err.message);
+      return;
+    }
+    setNewName("");
+    setNewCity("");
+    await load();
+  }
+
+  async function removeBranch(branch: Branch) {
+    const ok = window.confirm(
+      `¿Eliminar "${branch.name}"? Se borrará su historial de reproducciones.`,
+    );
+    if (!ok) return;
+    setError(null);
+    const { error: err } = await getSupabase()
+      .from("branches")
+      .delete()
+      .eq("id", branch.id);
+    if (err) setError(err.message);
+    await load();
+  }
+
+  async function copyLink(branch: Branch) {
+    const url = playerUrl(branch.branch_key, window.location.origin);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedId(branch.id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      window.prompt("URL del reproductor:", url);
+    }
+  }
 
   return (
-    <div className="space-y-6">
-      <header className="flex flex-wrap items-end justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold text-slate-900">Panel central</h1>
-          <p className="text-sm text-slate-500">
-            Estado de la red de sucursales y actividad de la radio corporativa.
-          </p>
-        </div>
-        <span
-          className={`flex items-center gap-1.5 text-xs font-bold ${
-            live ? "text-emerald-600" : "text-amber-600"
-          }`}
-        >
-          <span
-            className={`h-2 w-2 rounded-full ${
-              live ? "bg-emerald-500" : "bg-amber-500"
-            }`}
-          />
-          {live ? "Actualizaciones en vivo" : "Conectando…"}
-        </span>
-      </header>
-
+    <div className="flex h-[calc(100dvh-7rem)] min-h-[460px] flex-col gap-4">
       <ErrorNote message={error} />
 
-      {/* Banda de indicadores (estilo panel de gestión) */}
-      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-2xl bg-slate-200 sm:grid-cols-4">
+      {/* Banda de indicadores */}
+      <div className="grid shrink-0 grid-cols-2 gap-px overflow-hidden rounded-2xl bg-slate-200 sm:grid-cols-4">
         {[
           { label: "Sucursales", value: branches?.length ?? "…" },
           { label: "En línea", value: onlineCount, accent: true },
           { label: "Archivos", value: tracksCount },
           { label: "Playlists", value: playlistsCount },
         ].map((kpi) => (
-          <div key={kpi.label} className="bg-slate-800 px-5 py-4">
+          <div key={kpi.label} className="bg-slate-800 px-5 py-3">
             <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500">
               {kpi.label}
             </p>
             <p
-              className={`mt-1 text-3xl font-black ${
+              className={`mt-0.5 text-2xl font-black ${
                 kpi.accent ? "text-emerald-400" : "text-slate-900"
               }`}
             >
@@ -214,65 +274,182 @@ export default function DashboardPage() {
         ))}
       </div>
 
-      {/* Estado por sucursal */}
+      {/* Sucursales: disco de vinilo + acciones */}
       <Card
         title="Sucursales"
-        description="En línea = latido recibido en los últimos 60 segundos."
+        description="En línea = pantalla abierta en la sucursal (presencia en vivo) o latido reciente."
+        className="flex min-h-0 flex-1 flex-col"
         action={
-          <Link
-            href="/admin/branches"
-            className="text-sm font-semibold text-blue-600 hover:text-blue-700"
+          <Button
+            variant="ghost"
+            className="flex items-center gap-1.5"
+            onClick={() => setShowCreate((v) => !v)}
           >
-            Gestionar →
-          </Link>
+            <Plus size={16} />
+            Nueva sucursal
+          </Button>
         }
       >
+        {showCreate && (
+          <form
+            onSubmit={createBranch}
+            className="mb-4 grid shrink-0 gap-3 sm:grid-cols-[1.2fr_1fr_auto]"
+          >
+            <input
+              required
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="Nombre (Luxor Centro)"
+              className={inputClass}
+              aria-label="Nombre de la sucursal"
+            />
+            <input
+              value={newCity}
+              onChange={(e) => setNewCity(e.target.value)}
+              placeholder="Ciudad (opcional)"
+              className={inputClass}
+              aria-label="Ciudad"
+            />
+            <Button type="submit" disabled={saving}>
+              {saving ? "Creando…" : "Crear"}
+            </Button>
+          </form>
+        )}
+
         {branches === null ? (
           <Spinner />
         ) : branches.length === 0 ? (
           <EmptyState>
-            Aún no hay sucursales.{" "}
-            <Link href="/admin/branches" className="font-semibold text-blue-600">
-              Crear la primera
-            </Link>
+            Aún no hay sucursales: pulsa «Nueva sucursal» para crear la primera.
           </EmptyState>
         ) : (
-          <ul className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6">
+          <ul className="grid min-h-0 flex-1 content-start gap-3 overflow-y-auto [grid-template-columns:repeat(auto-fill,minmax(230px,1fr))]">
             {branches.map((b) => {
-              const online =
-                b.active &&
-                !!b.last_ping &&
-                now - Date.parse(b.last_ping) < ONLINE_WINDOW_MS;
-              const playing = nowPlaying.get(b.id);
+              const online = isOnline(b);
+              const live = usage.get(b.id);
+              const livePlaying = live?.playing ?? false;
               const statusLabel = !b.active
                 ? "Inactiva"
                 : online
-                  ? "En línea"
+                  ? livePlaying
+                    ? "Reproduciendo"
+                    : "En línea"
                   : "Desconectada";
-              // Texto del tooltip al pasar el mouse sobre la tarjeta.
+              const playing = nowPlaying.get(b.id);
+              // Pista autoritativa: la que el reproductor reporta en vivo;
+              // si no hay presencia (realtime caído), se usa el último log.
+              const liveTrack = livePlaying ? live?.track ?? null : null;
+              const nowTitle =
+                liveTrack ??
+                (playing?.track
+                  ? `${playing.track.title}${playing.track.artist ? ` — ${playing.track.artist}` : ""}`
+                  : null);
               const tooltip = [
                 `${b.name} — ${statusLabel}`,
                 `${b.city ?? "Sin ciudad"} · ${b.timezone}`,
                 `Latido: ${relativeTime(b.last_ping, now)}`,
-                playing?.track
-                  ? `Suena: ${playing.track.title}${playing.track.artist ? ` — ${playing.track.artist}` : ""}`
-                  : "Sin reproducciones registradas",
-              ].join("\n");
+                nowTitle ? `Suena: ${nowTitle}` : "Sin reproducciones registradas",
+                (live?.screens ?? 0) > 1
+                  ? `⚠ ${live?.screens} pantallas abiertas con este link (pueden sonar distintas)`
+                  : null,
+                `Reproductor: ${playerUrl(b.branch_key, typeof window !== "undefined" ? window.location.origin : "")}`,
+              ]
+                .filter(Boolean)
+                .join("\n");
 
               return (
                 <li key={b.id}>
                   <div
                     title={tooltip}
-                    className="flex aspect-square w-full cursor-default flex-col items-center justify-between rounded-xl border border-slate-200 bg-slate-50 p-2.5 transition hover:border-blue-500/60 hover:bg-slate-100"
+                    className="flex h-full flex-col rounded-2xl border border-slate-200 bg-slate-50 p-3.5 transition hover:border-blue-500/60"
                   >
-                    <div className="flex flex-1 items-center justify-center">
-                      <VinylDisc online={online} size={96} />
+                    <div className="flex items-center gap-1.5">
+                      <p className="truncate text-sm font-bold text-slate-900">
+                        {b.name}
+                      </p>
+                      {(live?.screens ?? 0) > 1 && (
+                        <span
+                          title="Varias pantallas abiertas con este mismo link: pueden sonar cosas distintas"
+                          className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-black text-amber-600 ring-1 ring-amber-200"
+                        >
+                          ×{live?.screens}
+                        </span>
+                      )}
                     </div>
-                    <p
-                      className="w-full truncate text-center text-xs font-semibold text-slate-900"
-                      aria-label={b.name}
-                    >
-                      {b.name}
+
+                    <div className="mt-2 flex items-center justify-center gap-2">
+                      <VinylDisc online={online} playing={livePlaying} size={96} />
+
+                      {/* Acciones de la sucursal (columna lateral) */}
+                      <div className="flex flex-col gap-1">
+                        <button
+                          onClick={() => removeBranch(b)}
+                          title="Eliminar sucursal"
+                          aria-label={`Eliminar ${b.name}`}
+                          className="rounded-lg p-1.5 text-slate-500 transition hover:bg-rose-50 hover:text-rose-600"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                        <button
+                          onClick={() => setAlertTarget(b.id)}
+                          disabled={!b.active}
+                          title={
+                            b.active
+                              ? "Lanzar mensaje a esta sucursal"
+                              : "Sucursal inactiva"
+                          }
+                          aria-label={`Lanzar mensaje a ${b.name}`}
+                          className="rounded-lg p-1.5 text-slate-500 transition hover:bg-rose-50 hover:text-rose-500 disabled:opacity-30 disabled:hover:bg-transparent"
+                        >
+                          <Mic size={18} />
+                        </button>
+                        <button
+                          onClick={() => copyLink(b)}
+                          title={
+                            copiedId === b.id
+                              ? "¡Enlace copiado!"
+                              : "Copiar enlace del reproductor"
+                          }
+                          aria-label={`Copiar enlace de ${b.name}`}
+                          className="rounded-lg p-1.5 text-slate-500 transition hover:bg-blue-50 hover:text-blue-400"
+                        >
+                          {copiedId === b.id ? (
+                            <Check size={18} className="text-emerald-400" />
+                          ) : (
+                            <Copy size={18} />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Pie: pista actual (presencia en vivo, si no, log) */}
+                    <p className="mt-2 flex items-center gap-1.5 truncate text-xs text-slate-500">
+                      {nowTitle ? (
+                        <>
+                          <Music2 size={13} className="shrink-0 text-blue-400" />
+                          <span className="truncate">{nowTitle}</span>
+                          {!liveTrack && (
+                            <span className="shrink-0 text-[10px] text-slate-400">
+                              · log
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <>
+                          <span
+                            className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                              !b.active
+                                ? "bg-slate-400"
+                                : online
+                                  ? "bg-emerald-500"
+                                  : "bg-rose-500"
+                            }`}
+                          />
+                          <span className="truncate">
+                            {statusLabel} · latido {relativeTime(b.last_ping, now)}
+                          </span>
+                        </>
+                      )}
                     </p>
                   </div>
                 </li>
@@ -282,19 +459,23 @@ export default function DashboardPage() {
         )}
       </Card>
 
-      {/* Botón flotante + modal de control en vivo */}
+      {/* Botón flotante (todas) + modal de control en vivo */}
       {branches && branches.length > 0 && (
         <>
           <button
-            onClick={() => setAlertOpen(true)}
+            onClick={() => setAlertTarget("all")}
             className="fixed bottom-6 right-6 z-40 flex h-14 w-14 items-center justify-center rounded-full bg-rose-600 text-white shadow-lg shadow-rose-600/30 transition hover:bg-rose-500 active:scale-95"
             aria-label="Abrir control en vivo"
-            title="Control en vivo"
+            title="Control en vivo (todas las sucursales)"
           >
             <Mic size={24} />
           </button>
-          {alertOpen && (
-            <AlertPanel branches={branches} onClose={() => setAlertOpen(false)} />
+          {alertTarget !== null && (
+            <AlertPanel
+              branches={branches}
+              initialTarget={alertTarget}
+              onClose={() => setAlertTarget(null)}
+            />
           )}
         </>
       )}

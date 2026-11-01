@@ -85,6 +85,52 @@ body {
   background-image: linear-gradient(135deg, #2563eb 0%, #38bdf8 100%);
 }
 
+/* Ecualizador decorativo del reproductor de sucursal */
+@keyframes eq {
+  0%,
+  100% {
+    transform: scaleY(0.25);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.eq-bar {
+  transform-origin: bottom;
+  animation: eq 0.9s ease-in-out infinite;
+}
+
+/* Anillo neón verde del disco de vinilo (sucursal en línea):
+   brillo en el borde que parpadea lentamente. */
+@keyframes neon-ring {
+  0%,
+  100% {
+    box-shadow:
+      0 0 6px 2px rgba(52, 211, 153, 0.9),
+      0 0 18px 6px rgba(16, 185, 129, 0.55);
+  }
+  50% {
+    box-shadow:
+      0 0 3px 1px rgba(52, 211, 153, 0.3),
+      0 0 8px 3px rgba(16, 185, 129, 0.15);
+  }
+}
+
+.neon-disc {
+  animation: neon-ring 3s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .eq-bar {
+    animation: none;
+    transform: scaleY(0.7);
+  }
+  .neon-disc {
+    animation: none;
+  }
+}
+
 input[type="range"] {
   accent-color: var(--lux-accent);
 }
