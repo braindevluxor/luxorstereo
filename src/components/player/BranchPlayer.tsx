@@ -5,7 +5,7 @@
 // (o un degradado corporativo si no hay imagen) + barra inferior de control.
 // Se deja abierta en pantalla completa: /branch?key=<branch_key>
 
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import {
   Megaphone,
   Music2,
@@ -18,9 +18,10 @@ import {
   VolumeX,
 } from "lucide-react";
 import { formatDuration } from "@/lib/schedule";
+import { useSlideIndex } from "@/components/useSlideIndex";
+import WaveCanvas from "./WaveCanvas";
 import {
   useBranchPlayer,
-  type PlayerEngine,
   type PlayerStatus,
 } from "./useBranchPlayer";
 
@@ -49,109 +50,6 @@ const HERO_WORD: Record<PlayerStatus, string> = {
   blocked: "START.",
   error: "ON AIR.",
 };
-
-// Onda sonora a la altura de la palabra del héroe: dibuja la forma de onda
-// REAL del audio (AnalyserNode del motor) mientras reproduce; si aún no hay
-// análisis (pausa, Web Audio no disponible) muestra una onda decorativa suave
-// que late con la reproducción.
-function SoundWave({
-  engine,
-  playing,
-}: {
-  engine: RefObject<PlayerEngine>;
-  playing: boolean;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const samples = new Uint8Array(2048);
-    let raf = 0;
-    let t = 0;
-
-    const frame = () => {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
-      const w = canvas.clientWidth;
-      const h = canvas.clientHeight;
-      if (w === 0 || h === 0) return;
-      const pw = Math.round(w * dpr);
-      const ph = Math.round(h * dpr);
-      if (canvas.width !== pw || canvas.height !== ph) {
-        canvas.width = pw;
-        canvas.height = ph;
-      }
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, w, h);
-
-      t += 0.035;
-      const mid = h / 2;
-      const analyser = engine.current.analyser;
-      const live = playing && analyser !== null;
-      if (live && analyser) analyser.getByteTimeDomainData(samples);
-
-      ctx.beginPath();
-      for (let x = 0; x <= w; x += 2) {
-        const p = x / w;
-        let y: number;
-        if (live && analyser) {
-          // Muestreo real de la señal de audio (128 = línea recta).
-          const idx = Math.min(samples.length - 1, Math.round(p * (samples.length - 1)));
-          y = mid + ((samples[idx] - 128) / 128) * (h * 0.46);
-        } else {
-          // Onda decorativa: plana en pausa, viva al reproducir.
-          const env = playing ? 1 : 0.25;
-          y = mid + Math.sin(p * 14 + t) * Math.sin(p * 3 - t * 0.7) * (h * 0.3) * env;
-        }
-        if (x === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-
-      // Color en ciclo: la onda recorre cian → azul → violeta → rosa y
-      // vuelve, distinto en cada tramo y cambiando con el tiempo.
-      const phase = (t * 10) % 360;
-      const hue = (p: number) => Math.round((phase + p * 120) % 360);
-      const grad = ctx.createLinearGradient(0, 0, w, 0);
-      grad.addColorStop(0, `hsla(${hue(0)}, 95%, 62%, 0)`);
-      grad.addColorStop(0.15, `hsla(${hue(0.15)}, 95%, 62%, 0.85)`);
-      grad.addColorStop(0.5, `hsla(${hue(0.5)}, 95%, 62%, 0.95)`);
-      grad.addColorStop(0.85, `hsla(${hue(0.85)}, 95%, 62%, 0.85)`);
-      grad.addColorStop(1, `hsla(${hue(1)}, 95%, 62%, 0)`);
-      ctx.strokeStyle = grad;
-      ctx.lineWidth = 2.5;
-      ctx.lineJoin = "round";
-      ctx.shadowColor = `hsla(${hue(0.5)}, 95%, 62%, 0.9)`;
-      ctx.shadowBlur = 12;
-      ctx.stroke();
-    };
-
-    if (reduce) {
-      // Sin animación continua: un solo trazo estático (respeta la preferencia).
-      frame();
-      window.addEventListener("resize", frame);
-      return () => window.removeEventListener("resize", frame);
-    }
-
-    const loop = () => {
-      frame();
-      raf = requestAnimationFrame(loop);
-    };
-    loop();
-    return () => cancelAnimationFrame(raf);
-  }, [engine, playing]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      className="pointer-events-none absolute left-1/2 top-1/2 h-44 w-[200vw] -translate-x-1/2 -translate-y-1/2"
-      aria-hidden="true"
-    />
-  );
-}
 
 function useClock(timeZone: string | null): string {
   const [now, setNow] = useState(() => new Date());
@@ -182,20 +80,47 @@ export default function BranchPlayer({ branchKey }: { branchKey: string }) {
   const progress = now && now.duration > 0 ? Math.min(1, state.progress / now.duration) : 0;
   const playing = state.status === "playing";
 
+  // Fondo: carrusel de imágenes si el administrador las configuró; si no, la
+  // imagen única anterior y, en último caso, el degradado corporativo.
+  const bgLayers =
+    state.backgroundUrls.length > 0
+      ? state.backgroundUrls
+      : state.backgroundUrl
+        ? [state.backgroundUrl]
+        : [];
+  const slideIndex = useSlideIndex(bgLayers.length);
+  const activeSlide =
+    bgLayers.length > 0 ? Math.min(slideIndex, bgLayers.length - 1) : -1;
+
+  // La palabra del héroe: picos, barras y orbe se dibujan a su lado
+  // (nunca por detrás); ondas y curvas sí la cruzan, como en la referencia.
+  const wordRef = useRef<HTMLHeadingElement>(null);
+
   return (
     <main className="relative flex min-h-dvh flex-col overflow-hidden text-white">
-      {/* Fondo: imagen configurada por el administrador (o degradado por defecto) */}
-      <div
-        className="absolute inset-0 bg-cover bg-center"
-        style={
-          state.backgroundUrl
-            ? { backgroundImage: `url("${state.backgroundUrl}")` }
-            : {
-                backgroundImage:
-                  "radial-gradient(1000px 600px at 20% 0%, rgba(37,99,235,0.55), transparent 60%), radial-gradient(800px 500px at 100% 20%, rgba(56,189,248,0.35), transparent 55%), linear-gradient(160deg, #0a0e17 0%, #0d1526 100%)",
-              }
-        }
-      />
+      {/* Fondo: carrusel / imagen elegida por el administrador (o degradado) */}
+      <div className="absolute inset-0">
+        {bgLayers.length === 0 ? (
+          <div
+            className="absolute inset-0"
+            style={{
+              backgroundImage:
+                "radial-gradient(1000px 600px at 20% 0%, rgba(37,99,235,0.55), transparent 60%), radial-gradient(800px 500px at 100% 20%, rgba(56,189,248,0.35), transparent 55%), linear-gradient(160deg, #0a0e17 0%, #0d1526 100%)",
+            }}
+          />
+        ) : (
+          bgLayers.map((url, i) => (
+            <div
+              key={`${i}:${url}`}
+              className="absolute inset-0 bg-cover bg-center transition-opacity duration-1000"
+              style={{
+                backgroundImage: `url("${url}")`,
+                opacity: i === activeSlide ? 1 : 0,
+              }}
+            />
+          ))
+        )}
+      </div>
       {/* Legibilidad del texto sobre cualquier imagen */}
       <div className="absolute inset-0 bg-gradient-to-r from-black/90 via-black/55 to-black/20" />
       <div className="absolute inset-0 bg-gradient-to-t from-black/95 via-transparent to-black/55" />
@@ -264,9 +189,26 @@ export default function BranchPlayer({ branchKey }: { branchKey: string }) {
           </p>
 
           <div className="relative mt-1">
-            {/* Onda sonora a la altura de la palabra (FFT real del audio) */}
-            <SoundWave engine={engine} playing={playing} />
-            <h2 className="relative text-[clamp(4rem,13vw,9.5rem)] font-black uppercase leading-[0.85] tracking-tight drop-shadow-[0_10px_40px_rgba(0,0,0,0.6)]">
+            {/* Onda sonora a la altura de la palabra (FFT real del audio).
+                Lienzo ancho para los 5 tipos: los picos, barras y orbe se
+                recortan junto a la palabra (avoid) y llegan al borde de la
+                pantalla; ondas y curvas la cruzan enteras. */}
+            {state.wave.visible && (
+              <WaveCanvas
+                cfg={state.wave}
+                engine={engine}
+                playing={playing}
+                avoid={wordRef}
+                className={`pointer-events-none absolute left-1/2 top-1/2 w-[200vw] -translate-x-1/2 -translate-y-1/2 ${
+                  // El orbe es una esfera: necesita más altura para verse grande.
+                  state.wave.type === "disco" ? "h-80" : "h-44"
+                }`}
+              />
+            )}
+            <h2
+              ref={wordRef}
+              className="relative text-[clamp(4rem,13vw,9.5rem)] font-black uppercase leading-[0.85] tracking-tight drop-shadow-[0_10px_40px_rgba(0,0,0,0.6)]"
+            >
               {HERO_WORD[state.status]}
             </h2>
           </div>
@@ -359,6 +301,9 @@ export default function BranchPlayer({ branchKey }: { branchKey: string }) {
               step={0.01}
               value={state.muted ? 0 : state.volume}
               onChange={(e) => controls.current?.setVolume(Number(e.target.value))}
+              // --vol gobierna el recorte del degradado: el color se
+              // descubre sólo hasta el nivel actual del pulgar.
+              style={{ "--vol": String(state.muted ? 0 : state.volume) } as CSSProperties}
               className="volume-gradient hidden w-28 sm:block"
               aria-label="Volumen"
             />
@@ -388,13 +333,7 @@ export default function BranchPlayer({ branchKey }: { branchKey: string }) {
           className="mt-2 text-center text-[11px] text-white/40"
           title={state.message}
         >
-          {state.message} ·{" "}
-          {state.realtime === "SUBSCRIBED"
-            ? "en vivo"
-            : `tiempo real: ${state.realtime ?? "…"}`}{" "}
-          · latido 15 s
-          {state.rtProbe ? ` · wss ${state.rtProbe}` : ""}
-          {state.rtDiag ? ` · ${state.rtDiag}` : ""}
+          {state.message} · latido 15 s
         </p>
       </div>
 

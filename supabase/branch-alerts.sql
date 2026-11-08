@@ -2,10 +2,9 @@
 --  LuxorStereo · Alertas con respaldo REST (entrega sin websocket)
 --  Ejecutar una sola vez en:  Supabase Dashboard -> SQL Editor -> New query
 --
---  El reproductor recibe las alertas por websocket Realtime (instantáneo).
---  Si el navegador/proxy de la sucursal bloquea el websocket, la alerta queda
---  guardada en esta tabla y el reproductor la recoge por REST a los pocos
---  segundos: la alerta siempre llega, con la latencia que sea necesaria.
+--  El reproductor recibe las alertas por sondeo REST (cada 3 s): el aviso
+--  queda guardado en esta tabla y el reproductor lo recoge a los pocos
+--  segundos, sin depender de websockets.
 -- =============================================================================
 
 create table if not exists public.branch_alerts (

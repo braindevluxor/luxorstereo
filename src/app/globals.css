@@ -111,28 +111,50 @@ body {
   }
 }
 
-/* Volumen del reproductor de sucursal: medidor de nivel en degradado
-   verde (bajo) → rojo (alto) y pulgar con degradado radial verde (centro)
-   → rojo (borde). Sólo lo usa la barra del reproductor (los range del
-   panel mantienen el accent-color de abajo). */
+/* Volumen del reproductor de sucursal: medidor de nivel. El degradado
+   verde (bajo) → rojo (alto) va mapeado al ancho TOTAL y vive en un
+   ::before recortado hasta el centro del pulgar (--vol-edge): el color
+   se "descubre" a medida que sube el nivel (al 50% sólo la mitad
+   izquierda tiene color; la derecha queda con el gris vacío del input).
+   El recorte NO va en la pista: en Chrome el pulgar es hijo de la pista
+   y un clip-path allí cortaba la esfera. Sólo lo usa la barra del
+   reproductor (los range del panel mantienen el accent-color de abajo). */
 .volume-gradient {
+  --vol: 0; /* nivel del pulgar 0..1 (lo escribe el componente) */
+  /* Borde del relleno: centro del pulgar (pulgar 18px → +9px). */
+  --vol-edge: calc(var(--vol) * (100% - 18px) + 9px);
   -webkit-appearance: none;
   appearance: none;
+  position: relative;
   height: 8px;
-  background: transparent;
+  border-radius: 9999px;
+  background: rgba(255, 255, 255, 0.15); /* tramo sin descubrir: gris */
   outline: none;
   cursor: pointer;
+}
+
+/* Capa del degradado: siempre mapeada al ancho total, recortada hasta
+   el nivel. Va en ::before para que el clip-path no toque al pulgar. */
+.volume-gradient::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: linear-gradient(to right, #22c55e 0%, #eab308 55%, #ef4444 100%);
+  clip-path: inset(0 calc(100% - var(--vol-edge)) 0 0 round 9999px);
+  pointer-events: none;
 }
 
 .volume-gradient::-webkit-slider-runnable-track {
   height: 8px;
   border-radius: 9999px;
-  background: linear-gradient(to right, #22c55e 0%, #eab308 55%, #ef4444 100%);
+  background: transparent; /* el vacío lo pinta el input (gris) */
 }
 
 .volume-gradient::-webkit-slider-thumb {
   -webkit-appearance: none;
   appearance: none;
+  position: relative; /* pinta ENCIMA de la capa ::before */
   width: 18px;
   height: 18px;
   margin-top: -5px; /* centra el pulgar (18px) sobre la pista (8px) */
@@ -142,10 +164,13 @@ body {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.6);
 }
 
+/* Firefox: el thumb es hermano de la pista (no hijo), así que allí el
+   recorte en la pista no lo corta. */
 .volume-gradient::-moz-range-track {
   height: 8px;
   border-radius: 9999px;
   background: linear-gradient(to right, #22c55e 0%, #eab308 55%, #ef4444 100%);
+  clip-path: inset(0 calc(100% - var(--vol-edge)) 0 0 round 9999px);
 }
 
 .volume-gradient::-moz-range-thumb {

@@ -5,18 +5,18 @@ import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
   AudioLines,
-  Building2,
   CalendarRange,
   LayoutDashboard,
   ListMusic,
   LogOut,
   Music2,
+  Palette,
 } from "lucide-react";
 import { getSupabase } from "@/lib/supabase/client";
 
 const LINKS = [
   { href: "/admin", label: "Panel", icon: LayoutDashboard },
-  { href: "/admin/branches", label: "Sucursales", icon: Building2 },
+  { href: "/admin/personalizacion", label: "Personalización", icon: Palette },
   { href: "/admin/media", label: "Medios", icon: Music2 },
   { href: "/admin/playlists", label: "Playlists", icon: ListMusic },
   { href: "/admin/schedule", label: "Programación", icon: CalendarRange },

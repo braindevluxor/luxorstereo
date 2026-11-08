@@ -4,9 +4,8 @@
 // reproducción (franjas horarias, rotación de spots, orden aleatorio).
 
 import { useCallback, useEffect, useState } from "react";
-import { Plus, Radio } from "lucide-react";
+import { Plus } from "lucide-react";
 import { getSupabase } from "@/lib/supabase/client";
-import { broadcastToBranch } from "@/lib/realtime";
 import { EMPTY_RULES } from "@/lib/schedule";
 import type { Branch, BranchPlaylist, Playlist, ScheduleRules } from "@/lib/types";
 import {
@@ -19,6 +18,40 @@ import {
   Spinner,
   inputClass,
 } from "@/components/ui";
+import HelpButton, { type Guide } from "@/components/admin/HelpButton";
+
+// Guía paso a paso de esta vista (las capturas viven en /public/guias).
+const GUIA: Guide = {
+  title: "Cómo usar Programación",
+  intro:
+    "Paso a paso para programar la música de una sucursal. Todo se guarda solo y el reproductor lo aplica en menos de un minuto.",
+  steps: [
+    {
+      image: "/guias/programacion-1.png",
+      alt: "Tarjeta Sucursal con el nombre de cada sucursal para elegir",
+      title: "Elige la sucursal",
+      body: "En la tarjeta «Sucursal» pulsa el nombre de la tienda que quieres programar. Se resalta en color y, debajo, aparecen las playlists que ya tiene asignadas.",
+    },
+    {
+      image: "/guias/programacion-2.png",
+      alt: "Tarjeta Asignaciones con el botón Añadir playlist arriba a la derecha",
+      title: "Añade una playlist",
+      body: "Pulsa «Añadir playlist» (arriba a la derecha de la tarjeta «Asignaciones»). Si el sistema aún no tiene ninguna playlist, créala antes en la sección «Playlists».",
+    },
+    {
+      image: "/guias/programacion-3.png",
+      alt: "Fila de asignación con playlist, franja horaria, spots y controles de activar o quitar",
+      title: "Ajusta las reglas y controla la fila",
+      body: "En cada fila cambia la playlist, marca la franja horaria (vacío = todo el día, hora local de la sucursal) y define cada cuántas canciones o cada cuántos minutos entra un spot. Al pie tienes «Orden aleatorio», el distintivo «Activa/Pausada» con «Pausar», y «Quitar asignación» (pide confirmación).",
+    },
+    {
+      image: "/guias/programacion-4.png",
+      alt: "Tarjeta Cómo decide el reproductor con la lógica de reproducción",
+      title: "Así lo aplica el reproductor",
+      body: "La última tarjeta resume el orden que sigue la tienda: franja horaria → playlist → spots según el límite configurado. No hay botón de guardar: cada cambio se guarda solo y llega al reproductor en ~1 minuto.",
+    },
+  ],
+};
 
 type Assignment = BranchPlaylist & { playlist: { name: string } | null };
 
@@ -64,8 +97,9 @@ function AssignmentRow({
     setBusy(false);
     if (err) setError(err.message);
     else {
+      // El reproductor recarga la configuración solo cada ~1 minuto
+      // (latido), así que el cambio se aplica sin Realtime.
       onChanged();
-      void broadcastToBranch(branch.branch_key, "reload", { at: Date.now() });
     }
   }
 
@@ -209,7 +243,6 @@ export default function SchedulePage() {
   const [branchId, setBranchId] = useState<string | null>(null);
   const [assignments, setAssignments] = useState<Assignment[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<string | null>(null);
 
   const loadBase = useCallback(async () => {
     const supabase = getSupabase();
@@ -261,19 +294,6 @@ export default function SchedulePage() {
     await loadAssignments();
   }
 
-  async function pushToBranch() {
-    if (!branch) return;
-    setFeedback(null);
-    const ok = await broadcastToBranch(branch.branch_key, "reload", {
-      at: Date.now(),
-    });
-    setFeedback(
-      ok
-        ? `Programación aplicada en «${branch.name}».`
-        : `«${branch.name}» no confirmó (¿está el reproductor abierto y con internet?).`,
-    );
-  }
-
   return (
     <div className="space-y-6">
       <header className="flex flex-wrap items-end justify-between gap-3">
@@ -281,20 +301,13 @@ export default function SchedulePage() {
           <h1 className="text-2xl font-bold text-slate-900">Programación</h1>
           <p className="text-sm text-slate-500">
             Reglas por sucursal: franjas horarias, frecuencia de spots y orden.
+            El reproductor las aplica solo en menos de un minuto.
           </p>
         </div>
-        <Button onClick={pushToBranch} disabled={!branch} className="flex items-center gap-2">
-          <Radio size={16} />
-          Aplicar en la sucursal
-        </Button>
+        <HelpButton guide={GUIA} />
       </header>
 
       <ErrorNote message={error} />
-      {feedback && (
-        <p className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">
-          {feedback}
-        </p>
-      )}
 
       <Card title="Sucursal">
         {branches === null ? (

@@ -1,6 +1,6 @@
 -- =============================================================================
 --  LuxorStereo · Hilo musical y radio corporativa
---  Esquema inicial para Supabase (PostgreSQL + RLS + Storage + Realtime)
+--  Esquema inicial para Supabase (PostgreSQL + RLS + Storage)
 --  Ejecutar una sola vez en:  Supabase Dashboard -> SQL Editor -> New query
 -- =============================================================================
 
@@ -286,23 +286,7 @@ create policy "audio admin delete" on storage.objects
   for delete to authenticated using (bucket_id = 'audio');
 
 -- -----------------------------------------------------------------------------
--- 5. REALTIME: feed de reproducciones y estado de sucursales en el dashboard
--- -----------------------------------------------------------------------------
-
-do $$
-begin
-  alter publication supabase_realtime add table public.station_logs;
-exception when duplicate_object then null; when undefined_object then null;
-end $$;
-
-do $$
-begin
-  alter publication supabase_realtime add table public.branches;
-exception when duplicate_object then null; when undefined_object then null;
-end $$;
-
--- -----------------------------------------------------------------------------
--- 6. DATOS DE EJEMPLO (opcional, borrar después)
+-- 5. DATOS DE EJEMPLO (opcional, borrar después)
 -- -----------------------------------------------------------------------------
 -- insert into public.tracks (title, artist, duration, file_url, type)
 -- values ('Ambient Morning', 'Librería interna', 180,

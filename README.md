@@ -2,7 +2,7 @@
 
 Aplicación web completa para gestionar la música de fondo y los spots
 publicitarios de una cadena de supermercados, con **Supabase** (PostgreSQL +
-Auth + Storage + Realtime) y **Next.js 15 (App Router) + TypeScript + Tailwind CSS**.
+Auth + Storage) y **Next.js 15 (App Router) + TypeScript + Tailwind CSS**.
 
 ---
 
@@ -26,7 +26,7 @@ Auth + Storage + Realtime) y **Next.js 15 (App Router) + TypeScript + Tailwind C
 
 1. Crea el proyecto en [supabase.com](https://supabase.com).
 2. **SQL Editor → New query** → pega y ejecuta [`supabase/schema.sql`](supabase/schema.sql)
-   (tablas + RLS + RPCs + bucket `audio` + publicación Realtime).
+   (tablas + RLS + RPCs + bucket `audio`).
 3. **Authentication → Users → Add user** → crea el usuario del panel
    (correo + contraseña). *No hay registro público a propósito*: el panel es
    un límite de confianza y sólo debe entrar personal autorizado.
@@ -95,7 +95,6 @@ LuxorStereo/
 │  └─ lib/
 │     ├─ types.ts                # Tipos de dominio (filas y payloads)
 │     ├─ schedule.ts             # Reglas de programación (funciones puras)
-│     ├─ realtime.ts             # Broadcast a los reproductores
 │     └─ supabase/
 │        ├─ client.ts            # Cliente de navegador (singleton)
 │        └─ server.ts            # Cliente para Server Components
@@ -113,7 +112,7 @@ LuxorStereo/
 | `tracks` | Medios: `title`, `artist`, `duration`, `file_url`, `storage_path`, `type` (`music`/`commercial`). |
 | `playlists` / `playlist_tracks` | Playlists y su orden (`position`). |
 | `branch_playlists` | Asignación playlist ↔ sucursal + `schedule_rules` (JSONB). |
-| `station_logs` | Auditoría de reproducciones (alimenta el dashboard vía Realtime). |
+| `station_logs` | Auditoría de reproducciones (alimenta el «ahora suena» del dashboard). |
 
 **Políticas RLS**
 
@@ -127,8 +126,8 @@ LuxorStereo/
   - `log_play(branch_key, track_id)` → registro de reproducción.
 - Lectura del bucket `audio` pública (los MP3 se descargan sin auth);
   subida/borrado sólo autenticados.
-- Los canales Realtime usan `branch:<branch_key>`: hace falta conocer la
-  sucursal para escucharla.
+- Las alertas viajan por las RPC `push_branch_alert` / `get_branch_alerts`
+  (REST): hace falta conocer el `branch_key` de la sucursal para leerlas.
 
 `schedule_rules` (JSONB):
 
@@ -152,7 +151,7 @@ LuxorStereo/
   listeners `online`/`offline` y latido cada 15 s; si la descarga falla, el
   `<audio>` hace streaming directo de la URL pública como último recurso.
 - **Estados visibles**: `Conectando · Sincronizando · Reproduciendo · En pausa
-  · Sin conexión · Error`, más el indicador Realtime y la hora local.
+  · Sin conexión · Error`, más el latido y la hora local.
 - **Franjas horarias**: el motor reevalúa la hora local en cada salto de tema,
   así que cambia de playlist automáticamente al cruzar la franja.
 - **Spots**: se insertan al llegar al límite de canciones o minutos; rotan por

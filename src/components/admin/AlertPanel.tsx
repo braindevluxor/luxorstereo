@@ -1,12 +1,12 @@
 "use client";
 
 // Control en vivo: envío de alertas/avisos urgentes a una o todas las
-// sucursales mediante Realtime broadcast.
+// sucursales. Se guardan en BD (push_branch_alert) y el reproductor las
+// recoge cada 3 s por REST: sin Realtime.
 
 import { useEffect, useState } from "react";
 import { Megaphone, Mic, X } from "lucide-react";
 import { getSupabase } from "@/lib/supabase/client";
-import { broadcastToBranches } from "@/lib/realtime";
 import type { Branch, Track } from "@/lib/types";
 import { Button, ErrorNote, Field, Input, inputClass } from "@/components/ui";
 
@@ -80,12 +80,22 @@ export default function AlertPanel({
     if (hold !== "") payload.hold_seconds = Number(hold);
 
     setSending(true);
-    const { sent, failed } = await broadcastToBranches(
-      targets.map((b) => b.branch_key),
-      "alert",
-      payload,
+    const results = await Promise.all(
+      targets.map(async (b) => {
+        try {
+          const { error } = await getSupabase().rpc("push_branch_alert", {
+            p_branch_key: b.branch_key,
+            p_payload: payload,
+          });
+          return !error;
+        } catch {
+          return false;
+        }
+      }),
     );
     setSending(false);
+    const sent = results.filter(Boolean).length;
+    const failed = results.length - sent;
 
     if (sent === 0) {
       setError("Ninguna sucursal confirmó la recepción. Revisa su conexión.");
@@ -112,7 +122,8 @@ export default function AlertPanel({
               Control en vivo
             </h2>
             <p className="mt-0.5 text-sm text-slate-500">
-              Las alertas interrumpen la música en la sucursal y se muestran de inmediato.
+              Las alertas interrumpen la música en la sucursal y llegan en unos
+              segundos.
             </p>
           </div>
           <button

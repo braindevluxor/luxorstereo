@@ -6,32 +6,31 @@
 // desplazamiento interno sólo en la lista de sucursales.
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, Copy, Mic, Music2, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, Mic, Music2, Pencil, Plus, Power, Trash2 } from "lucide-react";
 import { getSupabase } from "@/lib/supabase/client";
 import type { Branch, TrackType } from "@/lib/types";
 import AlertPanel from "@/components/admin/AlertPanel";
-import { useBranchUsage } from "@/components/admin/useBranchUsage";
 import { Button, Card, EmptyState, ErrorNote, Spinner, inputClass } from "@/components/ui";
 
 interface LogRow {
   id: string;
   branch_id: string;
   played_at: string;
-  track: { title: string; artist: string | null; type: TrackType } | null;
+  track: { title: string; artist: string | null; type: TrackType; duration: number } | null;
   branch: { name: string } | null;
 }
 
-// Ventana de respaldo: si no hay presencia Realtime, se considera en línea
-// con un latido de hasta 2 minutos (los temporizadores en segundo plano del
-// navegador de la sucursal se ralentizan y no deben marcar falso offline).
+// Se considera en línea con un latido de hasta 2 minutos (los temporizadores
+// en segundo plano del navegador de la sucursal se ralentizan y no deben
+// marcar falso offline).
 const ONLINE_WINDOW_MS = 120_000;
 
-// Zona horaria fija para todas las sucursales (igual que en /admin/branches).
+// Zona horaria fija para todas las sucursales.
 const DEFAULT_TIMEZONE = "America/Caracas";
 
 // Disco de vinilo (GIF animado de public/). Gira sólo mientras la sucursal
-// está reproduciendo; el centro del disco es verde si el link está en línea
-// (presencia en vivo o latido reciente) y rojo si está desconectado.
+// está reproduciendo (según el registro de reproducciones); el centro del
+// disco es verde si el link está en línea (latido reciente) y rojo si no.
 function VinylDisc({
   online,
   playing,
@@ -128,7 +127,7 @@ export default function DashboardPage() {
       supabase
         .from("station_logs")
         .select(
-          "id, branch_id, played_at, track:tracks(title,artist,type), branch:branches(name)",
+          "id, branch_id, played_at, track:tracks(title,artist,type,duration), branch:branches(name)",
         )
         .order("played_at", { ascending: false })
         .limit(25),
@@ -156,45 +155,17 @@ export default function DashboardPage() {
     return () => clearInterval(id);
   }, []);
 
-  // Refresco periódico de latidos (respaldo si el evento Realtime no llega).
+  // Refresco periódico: latidos, reproducciones y cambios de sucursal
+  // (sin Realtime: todo llega por REST cada 15 s).
   useEffect(() => {
     const id = setInterval(() => void load(), 15_000);
     return () => clearInterval(id);
   }, [load]);
 
-  // Uso en vivo: qué links están abiertos/sonando (presencia Realtime).
-  const usage = useBranchUsage(branches);
-
   const isOnline = (b: Branch) =>
     b.active &&
-    (usage.has(b.id) ||
-      (!!b.last_ping && now - Date.parse(b.last_ping) < ONLINE_WINDOW_MS));
-
-  // Realtime: inserciones de reproducciones y cambios de latido.
-  useEffect(() => {
-    const supabase = getSupabase();
-    const channel = supabase
-      .channel("admin-dashboard")
-      .on(
-        "postgres_changes",
-        { event: "INSERT", schema: "public", table: "station_logs" },
-        () => {
-          void load();
-        },
-      )
-      .on(
-        "postgres_changes",
-        { event: "UPDATE", schema: "public", table: "branches" },
-        () => {
-          void load();
-        },
-      )
-      .subscribe();
-
-    return () => {
-      void supabase.removeChannel(channel);
-    };
-  }, [load]);
+    !!b.last_ping &&
+    now - Date.parse(b.last_ping) < ONLINE_WINDOW_MS;
 
   const nowPlaying = new Map<string, LogRow>();
   for (const log of logs) {
@@ -234,6 +205,30 @@ export default function DashboardPage() {
     const { error: err } = await getSupabase()
       .from("branches")
       .delete()
+      .eq("id", branch.id);
+    if (err) setError(err.message);
+    await load();
+  }
+
+  async function renameBranch(branch: Branch) {
+    const name = window.prompt("Nuevo nombre de la sucursal:", branch.name);
+    if (name === null) return;
+    const trimmed = name.trim();
+    if (!trimmed || trimmed === branch.name) return;
+    setError(null);
+    const { error: err } = await getSupabase()
+      .from("branches")
+      .update({ name: trimmed })
+      .eq("id", branch.id);
+    if (err) setError(err.message);
+    await load();
+  }
+
+  async function toggleBranch(branch: Branch) {
+    setError(null);
+    const { error: err } = await getSupabase()
+      .from("branches")
+      .update({ active: !branch.active })
       .eq("id", branch.id);
     if (err) setError(err.message);
     await load();
@@ -280,7 +275,7 @@ export default function DashboardPage() {
       {/* Sucursales: disco de vinilo + acciones */}
       <Card
         title="Sucursales"
-        description="En línea = pantalla abierta en la sucursal (presencia en vivo) o latido reciente."
+        description="En línea = latido reciente del reproductor (ventana de 2 minutos)."
         className="flex min-h-0 flex-1 flex-col"
         action={
           <Button
@@ -329,8 +324,15 @@ export default function DashboardPage() {
           <ul className="grid min-h-0 flex-1 content-start gap-3 overflow-y-auto [grid-template-columns:repeat(auto-fill,minmax(230px,1fr))]">
             {branches.map((b) => {
               const online = isOnline(b);
-              const live = usage.get(b.id);
-              const livePlaying = live?.playing ?? false;
+              const playing = nowPlaying.get(b.id);
+              // El registro anota el inicio de cada pista/spot: mientras no
+              // haya pasado su duración, la sucursal sigue sonando (así se
+              // sustituye la presencia de Realtime). Duración desconocida →
+              // ventana de 5 minutos.
+              const dur = playing?.track?.duration ?? 0;
+              const livePlaying =
+                !!playing &&
+                now - Date.parse(playing.played_at) < (dur > 0 ? dur : 300) * 1000;
               const statusLabel = !b.active
                 ? "Inactiva"
                 : online
@@ -338,23 +340,14 @@ export default function DashboardPage() {
                     ? "Reproduciendo"
                     : "En línea"
                   : "Desconectada";
-              const playing = nowPlaying.get(b.id);
-              // Pista autoritativa: la que el reproductor reporta en vivo;
-              // si no hay presencia (realtime caído), se usa el último log.
-              const liveTrack = livePlaying ? live?.track ?? null : null;
-              const nowTitle =
-                liveTrack ??
-                (playing?.track
-                  ? `${playing.track.title}${playing.track.artist ? ` — ${playing.track.artist}` : ""}`
-                  : null);
+              const nowTitle = playing?.track
+                ? `${playing.track.title}${playing.track.artist ? ` — ${playing.track.artist}` : ""}`
+                : null;
               const tooltip = [
                 `${b.name} — ${statusLabel}`,
                 `${b.city ?? "Sin ciudad"} · ${b.timezone}`,
                 `Latido: ${relativeTime(b.last_ping, now)}`,
                 nowTitle ? `Suena: ${nowTitle}` : "Sin reproducciones registradas",
-                (live?.screens ?? 0) > 1
-                  ? `⚠ ${live?.screens} pantallas abiertas con este link (pueden sonar distintas)`
-                  : null,
                 `Reproductor: ${playerUrl(b.branch_key, typeof window !== "undefined" ? window.location.origin : "")}`,
               ]
                 .filter(Boolean)
@@ -370,14 +363,14 @@ export default function DashboardPage() {
                       <p className="truncate text-sm font-bold text-slate-900">
                         {b.name}
                       </p>
-                      {(live?.screens ?? 0) > 1 && (
-                        <span
-                          title="Varias pantallas abiertas con este mismo link: pueden sonar cosas distintas"
-                          className="shrink-0 rounded-full bg-amber-50 px-1.5 py-0.5 text-[10px] font-black text-amber-600 ring-1 ring-amber-200"
-                        >
-                          ×{live?.screens}
-                        </span>
-                      )}
+                      <button
+                        onClick={() => renameBranch(b)}
+                        title="Renombrar sucursal"
+                        aria-label={`Renombrar ${b.name}`}
+                        className="shrink-0 rounded p-0.5 text-slate-400 transition hover:bg-blue-50 hover:text-blue-600"
+                      >
+                        <Pencil size={12} />
+                      </button>
                     </div>
 
                     <div className="mt-2 flex items-center justify-center gap-2">
@@ -385,6 +378,20 @@ export default function DashboardPage() {
 
                       {/* Acciones de la sucursal (columna lateral) */}
                       <div className="flex flex-col gap-1">
+                        <button
+                          onClick={() => toggleBranch(b)}
+                          title={
+                            b.active ? "Desactivar sucursal" : "Activar sucursal"
+                          }
+                          aria-label={`${b.active ? "Desactivar" : "Activar"} ${b.name}`}
+                          className={`rounded-lg p-1.5 transition ${
+                            b.active
+                              ? "text-slate-500 hover:bg-amber-50 hover:text-amber-600"
+                              : "bg-emerald-50 text-emerald-600 hover:bg-emerald-100"
+                          }`}
+                        >
+                          <Power size={18} />
+                        </button>
                         <button
                           onClick={() => removeBranch(b)}
                           title="Eliminar sucursal"
@@ -425,17 +432,12 @@ export default function DashboardPage() {
                       </div>
                     </div>
 
-                    {/* Pie: pista actual (presencia en vivo, si no, log) */}
+                    {/* Pie: pista actual (registro de reproducciones) */}
                     <p className="mt-2 flex items-center gap-1.5 truncate text-xs text-slate-500">
                       {nowTitle ? (
                         <>
                           <Music2 size={13} className="shrink-0 text-blue-400" />
                           <span className="truncate">{nowTitle}</span>
-                          {!liveTrack && (
-                            <span className="shrink-0 text-[10px] text-slate-400">
-                              · log
-                            </span>
-                          )}
                         </>
                       ) : (
                         <>
